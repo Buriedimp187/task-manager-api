@@ -414,8 +414,9 @@ The default test run does not need a running database. The task endpoint tests i
 ## Continuous integration
 
 > **Not yet verified on GitHub.** No remote repository is configured, so the workflow has never run there. Its commands were
-> run locally (on Linux with Python 3.13 and on Windows with 3.14), and its structure is checked by tests, but GitHub's own
-> parsing and execution of it is unconfirmed. Expect to fix small problems on the first real run.
+> run locally in Linux containers (Python 3.13 and 3.14, including the PostgreSQL job) and on Windows with Python 3.14, and
+> its structure is checked by tests, but GitHub's own parsing and execution of it is unconfirmed. Expect to fix small problems
+> on the first real run.
 
 `.github/workflows/ci.yml` runs on every pull request, on every push to the repository's **default branch**, and on demand (**Actions** > **CI** > **Run workflow**). No branch name is written in the file: each job checks `github.event.repository.default_branch`, so it keeps working if the default branch is not called `main`. A push to another branch starts the workflow with every job skipped, and its pull request is tested once. A newer push to a pull request cancels the run in progress; runs on the default branch are never cancelled. It needs no secrets, has read-only access to the repository, and deploys or publishes nothing.
 
@@ -425,9 +426,10 @@ The default test run does not need a running database. The task endpoint tests i
 | Tests with PostgreSQL (Python 3.13) | The whole suite against a throwaway PostgreSQL 17 service container: it waits until the database accepts connections, creates a separate `ci_test` database for the destructive tests, and fails if **any** test is skipped. |
 | Docker image and Compose stack | Both Compose files validate; the image builds and runs as a non-root user; the production stack starts (database, migration, API) and answers `/health`, `/health/db`, a `404` on `/docs` and a `403` on registration. |
 
-The Python versions are the one in the Docker image (3.13) and the one used for development (3.14). The pinned dependencies were
-checked to have Linux wheels for 3.14, but the suite itself has not been run on Linux with 3.14, so treat the first 3.14 job as
-the real test of that combination. The same pinned versions are used everywhere: ruff, pytest and every transitive dependency
+The Python versions are the one in the Docker image (3.13) and the one used for development (3.14). Both have been tested on
+Linux: the workflow's own commands, including the PostgreSQL job, were run with the pinned dependencies in `python:3.13-slim`
+and `python:3.14-slim` containers. That was local Docker, not GitHub's runners, so the first run on GitHub is still the real
+confirmation. The same pinned versions are used everywhere: ruff, pytest and every transitive dependency
 come from `requirements-dev.txt` and `constraints.txt`, so CI and your machine run the same tools. Third-party actions are pinned
 to full commit SHAs (the version is in the comment beside each), and the database image digests are pinned too. Update all of
 them on purpose.
@@ -459,8 +461,9 @@ For the PostgreSQL job, start a disposable database (see "PostgreSQL integration
 - **Database.** Backups are up to you. Downgrade guards protect only online migrations, not the SQL printed by `--sql`. Renaming the
   Compose project changes the volume name (see "Volume names changed").
 - **Supply chain.** Dependencies and base images are pinned for reproducibility but not scanned or updated automatically.
-- **Verification.** The GitHub Actions workflow has not run on GitHub, the suite has not been run on Linux with Python 3.14, and
-  the project has had no independent security review.
+- **Verification.** The GitHub Actions workflow has not run on GitHub, and the project has had no independent security review.
+  The suite has passed locally on Windows with Python 3.14 and in Linux containers with Python 3.13 and 3.14, including
+  against PostgreSQL.
 
 ## Security
 

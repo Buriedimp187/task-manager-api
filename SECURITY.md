@@ -85,4 +85,4 @@ For the maintainer. Do these before the repository is made public, then delete t
       "Reporting a vulnerability" with it. Do not list an address that nobody reads.
 - [ ] Confirm that no real secret has ever been committed (`.env` is ignored, and `.env.example` holds only
       placeholders), and rotate any `SECRET_KEY` or database password that was ever shared.
-- [ ] Decide the legal name to use in `LICENSE`, which currently names the Git author, `Buriedimp187`.
+- [x] Copyright holder decided: `LICENSE` names `Buriedimp187`, the owner of the project. No change needed.
