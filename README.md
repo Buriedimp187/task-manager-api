@@ -1,15 +1,58 @@
 # Task Manager API
 
-A REST API for managing tasks, built with Python, FastAPI, PostgreSQL, SQLAlchemy and Pytest.
+A REST API for managing personal task lists, built with Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic and Pytest.
+People register, log in, and manage their own tasks; nobody else can see or change them.
 
-Status: early development. People can register, log in, and manage their own tasks (create, list, get, update, delete). Data is stored in PostgreSQL, the schema is managed by Alembic migrations, and there are health endpoints. Each task belongs to the account that created it, and no one else can see or change it. Not done yet: rate limiting, password reset, token revocation, containers and CI.
+**Status: early development, no releases yet.** The code has not had an independent security review or audit, and the
+GitHub Actions workflow has **not yet run on GitHub** (no remote repository is configured). See
+[Known limitations](#known-limitations-and-operational-notes) before relying on it for anything important.
+
+## Features
+
+- Accounts with registration and login; passwords stored as Argon2id hashes; short-lived (30 minute) signed access tokens.
+- Tasks (create, list, get, update, delete) that belong to one account. Another account's task looks exactly like a
+  missing one (`404`).
+- Paginated task listing (default 50, at most 200 per page), and a limit of 1,000 tasks per account.
+- Rate limiting of login and registration, a 64 KiB request-body limit, and registration that can be switched off.
+- PostgreSQL with Alembic migrations (downgrades refuse to destroy data), statement, lock and idle-transaction
+  timeouts, a bounded connection pool, and a controlled `503` when the database is unavailable or busy.
+- Liveness and readiness health endpoints.
+- A hardened container image and a production Docker Compose stack, separate from the development workflow.
+- Ruff, a test suite with PostgreSQL integration tests, and a GitHub Actions workflow (not yet run on GitHub).
+
+## Contents
+
+[Requirements](#requirements) · [Run locally](#run-locally) · [Configuration](#configuration-reference) ·
+[Docker](#docker-development-and-production) · [Authentication](#authentication) · [Tasks API](#tasks-api) ·
+[Limits at a glance](#limits-at-a-glance) · [Health checks](#health-checks) · [Test](#test) ·
+[Continuous integration](#continuous-integration) · [Known limitations](#known-limitations-and-operational-notes) ·
+[Security](#security) · [License](#license)
+
+## Requirements
+
+- Python **3.13 or 3.14**. The CI workflow targets both, the Docker image uses 3.13, and development has been done on 3.14.
+- Docker with Compose v2, to run PostgreSQL (and the production stack). Docker Desktop must be running on Windows and macOS.
+- Git.
 
 ## Run locally
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-pip install -r requirements-dev.txt
+source .venv/bin/activate         # Linux / macOS
+# .venv\Scripts\Activate.ps1      # Windows PowerShell
+# .venv\Scripts\activate.bat      # Windows cmd
+pip install -r requirements-dev.txt -c constraints.txt
+```
+
+`constraints.txt` fixes every dependency (including transitive ones) to the versions the project was tested with.
+
+Then, in short: copy `.env.example` to `.env` and fill it in, start the database, create the schema, and run the API.
+Each step is explained below.
+
+```bash
+docker compose up -d --wait db
+alembic upgrade head
+uvicorn app.main:app --reload --no-proxy-headers
 ```
 
 ### Database
@@ -23,11 +66,13 @@ PostgreSQL runs in Docker (Docker Desktop must be running).
    docker compose up -d --wait db
    ```
 
-The database is published on `127.0.0.1` only, so it is not reachable from other machines.
+In development the database is published on `127.0.0.1` only (by `docker-compose.override.yml`), so it is not reachable from
+other machines. The production stack does not publish it at all (see "Docker: development and production").
 
 #### Credentials and the data volume
 
-Data is stored in the `postgres_data` Docker volume. PostgreSQL creates its user, password and database only the first time that volume is created. Changing `POSTGRES_USER`, `POSTGRES_PASSWORD` or `POSTGRES_DB` in `.env` afterwards does **not** update an existing database, and the API will fail to authenticate until `.env` matches the credentials the volume was created with.
+Data is stored in the `postgres_data` Docker volume (its full name is `task-manager-api_postgres_data`; if you have an
+older one, see "Volume names changed" below). PostgreSQL creates its user, password and database only the first time that volume is created. Changing `POSTGRES_USER`, `POSTGRES_PASSWORD` or `POSTGRES_DB` in `.env` afterwards does **not** update an existing database, and the API will fail to authenticate until `.env` matches the credentials the volume was created with.
 
 - `docker compose down` stops the database and keeps your data.
 - `docker compose down -v` also deletes the volume and **permanently destroys all data in it**. Use it only when you intentionally want to reset a disposable local database, for example to start over with new credentials. Never run it on a database whose contents you want to keep.
@@ -41,6 +86,27 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
 Keep it secret and out of Git: anyone who knows it can forge a login for any account. Changing it invalidates every token that was issued, so everyone has to log in again. Alembic does not need it, so migrations run without a signing key.
+
+### Configuration reference
+
+Settings come from environment variables, and from `.env` for anything not set in the environment (the environment wins).
+`.env.example` lists all of them with placeholders; copy it to `.env`, which Git ignores. **Never commit `.env` or put a real
+password or `SECRET_KEY` in any tracked file.** Invalid values are rejected with a validation error that does not echo
+secrets.
+
+| Variable | Default | Purpose and details |
+|---|---|---|
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | none, **required** | The database account and name. Compose creates the database with these the first time. |
+| `POSTGRES_HOST`, `POSTGRES_PORT` | `127.0.0.1`, `5432` | Where the API connects when it runs on your machine. In the container stack the host is always `db`. `POSTGRES_PORT` is also the host port the development database is published on. |
+| `SECRET_KEY` | none, **required** | Signs access tokens; at least 32 characters. See "Signing key". |
+| `DB_*`, `REQUEST_THREADS` | see "Database limits" | Timeouts, connection pool and worker threads. |
+| `LOGIN_*`, `REGISTER_*`, `TRUSTED_PROXIES` | see "Abuse protection" | Rate limits and trusted reverse proxies. |
+| `REGISTRATION_ENABLED` | `true` (`false` in the production Compose file) | Whether `POST /auth/register` works. |
+| `DOCS_ENABLED` | `true` (`false` in the production Compose file) | Whether `/docs`, `/redoc` and `/openapi.json` exist. |
+| `MAX_TASKS_PER_USER` | `1000` | See "Tasks API". |
+| `API_PORT` | `8000` | Docker Compose only: the host port the containerized API is published on (on `127.0.0.1`). |
+| `TEST_POSTGRES_DB` | unset | Tests only: a disposable database for the PostgreSQL integration tests. See "PostgreSQL integration tests". |
+| `COMPOSE_PROJECT_NAME` | `task-manager-api` | Docker Compose only; see "Volume names changed". |
 
 ### Migrations
 
@@ -135,7 +201,9 @@ alembic upgrade head
 uvicorn app.main:app --reload --no-proxy-headers
 ```
 
-Open http://127.0.0.1:8000/docs for the interactive documentation. Register and log in with the `/auth` endpoints, then use **Authorize** and paste the `access_token`.
+Open http://127.0.0.1:8000/docs for the interactive documentation (it exists while `DOCS_ENABLED` is true, which is the default
+outside the production Compose file). Register and log in with the `/auth` endpoints, then use **Authorize** and paste the
+`access_token`.
 
 ## Docker: development and production
 
@@ -204,7 +272,7 @@ Login and registration are rate limited per client address, before any password 
 | `LOGIN_IP_LIMIT` / `LOGIN_IP_WINDOW_SECONDS` | 10 / 60 | Login attempts per address (all usernames). |
 | `LOGIN_USER_LIMIT` / `LOGIN_USER_WINDOW_SECONDS` | 5 / 60 | Attempts per address and username (case-insensitive). A successful login clears it. |
 | `REGISTER_IP_LIMIT` / `REGISTER_IP_WINDOW_SECONDS` | 5 / 3600 | Registration attempts per address, successful or not. |
-| `REGISTRATION_ENABLED` | `true` | `false` makes `POST /auth/register` answer `403`; login is unaffected. Set it to `false` in production once the accounts exist. |
+| `REGISTRATION_ENABLED` | `true` (`false` in the production Compose file) | `false` makes `POST /auth/register` answer `403`; login is unaffected. |
 | `TRUSTED_PROXIES` | empty | Comma-separated addresses or networks of reverse proxies whose `X-Forwarded-For` header is believed. |
 
 Over the limit the API answers `429 {"detail": "Too many requests. Try again later."}` with a `Retry-After` header. The response is identical whichever limit was hit and whether or not the account exists, and a correct password is refused too while limited. IPv6 clients are grouped by /64.
@@ -213,9 +281,11 @@ Over the limit the API answers `429 {"detail": "Too many requests. Try again lat
 
 - Counters live in this process's memory: they reset on restart, and with several processes or replicas each counts separately, so the real limit is multiplied. Run one process, or add a shared store.
 - Clients are identified by their connection address. `X-Forwarded-For` is ignored unless the connection comes from a `TRUSTED_PROXIES` entry; then the nearest address in the header that is not itself a trusted proxy is used.
-- **Start uvicorn with `--no-proxy-headers`** (the Docker image already does). By default uvicorn rewrites the client address from `X-Forwarded-For` for connections from `127.0.0.1`, which lets a local client evade the limits (verified). Behind a reverse proxy, use `--no-proxy-headers` together with `TRUSTED_PROXIES`.
+- **Start uvicorn with `--no-proxy-headers`** (the Docker image already does). By default uvicorn rewrites the client address from `X-Forwarded-For` for connections from `127.0.0.1`, which lets a local client evade the limits (this was tested).
 - Behind a reverse proxy, list the proxy in `TRUSTED_PROXIES` (and keep `--no-proxy-headers`). Without it every user appears to come from the proxy's address and shares one set of limits. The proxy must set or append `X-Forwarded-For` itself, not pass a client's value through unchanged. Do not set uvicorn's `FORWARDED_ALLOW_IPS` or pass `--proxy-headers`: they make uvicorn trust the header independently of this setting.
 - Many clients behind one address (a company NAT) share its limits.
+- Failed registrations count against the registration limit too, and a registration attempt for a taken name reveals that the
+  name exists (see the table below).
 
 **Usernames** are 3 to 32 characters: ASCII letters, digits, `_`, `-` and `.`. They are unique **ignoring case**, enforced by PostgreSQL itself (`Alice` and `alice` cannot both exist, even if two registrations arrive at the same moment). The case you chose is kept, and logging in ignores case. **Passwords** are 10 to 128 characters and are used exactly as typed (not trimmed). They are stored only as an Argon2id hash (19 MiB, 2 passes, 1 lane, the minimum OWASP recommends) and are never returned or logged.
 
@@ -230,7 +300,10 @@ Over the limit the API answers `429 {"detail": "Too many requests. Try again lat
 
 Tokens are signed with HS256. The server fixes the accepted algorithm and requires the `sub`, `iat` and `exp` claims, so unsigned tokens, tokens signed with another key or algorithm, and tokens missing a claim are all refused. The claims are checked strictly: a token must carry exactly `sub`, `iat` and `exp`; `iat` and `exp` must be whole numbers (not strings, decimals or booleans), `exp` must be in the future and after `iat`, `iat` may not be in the future (beyond 5 seconds of clock skew), the token may not live longer than the 30 minutes this server issues, and `sub` must be a positive integer that fits the user id column. Every failure is the same `401`. The password hash used to keep the login time of unknown usernames in line with real ones is created once when the server starts.
 
-**Limitations.** There is **no rate limiting**, so logins can be tried without limit and each one costs CPU and memory to hash. Registration is open to anyone. There is no password change or reset, email verification, account deletion or roles. A token cannot be revoked before it expires (logging out is up to the client).
+**Limitations.** Registration is open to anyone unless `REGISTRATION_ENABLED` is `false`. There is no password change or reset,
+email verification, account deletion or roles. A token cannot be revoked before it expires (logging out is up to the client).
+Rate limiting is per client address and per process (see "Abuse protection"), so a distributed attack from many addresses is
+limited only by each address's own budget.
 
 ## Tasks API
 
@@ -293,14 +366,31 @@ PATCH /tasks/1
 | `401` | `{"detail": "Not authenticated"}` | No valid token. Checked before the body or the id, so an unauthenticated request never learns whether a task exists. |
 | `404` | `{"detail": "Task not found"}` | None of **your** tasks has that id: it does not exist, or it belongs to someone else. This includes `DELETE`. |
 | `409` | `{"detail": "Task limit of 1000 reached"}` | `POST /tasks` only: the account already holds the maximum number of tasks. |
+| `413` | `{"detail": "Request body too large"}` | Any request whose body is over 64 KiB (see "Limits at a glance"). A malformed `Content-Length` header gets `400 {"detail": "Invalid Content-Length header"}`. |
 | `422` | FastAPI's standard validation details, which echo the rejected value in `input` (except under `/auth`, see above) | Invalid body or id. Nothing was changed. Text that cannot be encoded as UTF-8, such as a lone surrogate (`"\ud800"` in JSON), is shown as `<unencodable text>` instead of being echoed. |
 | `503` | `{"detail": "Database unavailable"}` | The database could not be reached. This includes a wrong password, user or database name in the settings, which PostgreSQL's driver reports before the server can answer, so they cannot be told apart from an outage. |
 | `503` | `{"detail": "Database busy, retry shortly"}` with `Retry-After: 1` | The database is up but a lock or statement timed out, or no connection was free in time. Retry. A task creation that waits more than the lock timeout (3 s by default) for another creation by the same account ends this way. |
+| `429` | `{"detail": "Too many requests. Try again later."}` with `Retry-After` | `/auth/register` and `/auth/login` only; see "Abuse protection". |
 | `500` | `Internal Server Error` | Unexpected errors and missing or invalid configuration. The response never contains details or credentials. |
 
 Database errors are never returned to the client. For a `503` the server log records only the exception class names.
 
 **Limitations.** There is no filtering or search, and `GET /tasks` is paginated only by `limit` and `offset`. Tasks have no `updated_at`.
+
+## Limits at a glance
+
+| Limit | Value | When exceeded |
+|---|---|---|
+| Request body | 64 KiB (65,536 bytes), counted as it arrives as well as from `Content-Length`, so chunked uploads are covered | `413`. A client still uploading when the limit is reached may see its connection reset before it can read the `413`. |
+| Page size | 50 by default, 200 at most | `422` for `limit` above 200 or below 1 |
+| Tasks per account | 1,000 (`MAX_TASKS_PER_USER`) | `409` on creation |
+| Login attempts | 10 per minute per address, 5 per minute per address and username | `429` |
+| Registration attempts | 5 per hour per address | `429` |
+| Access token lifetime | 30 minutes | `401` after expiry |
+| Statement, lock and idle-transaction time | 5 s, 3 s and 15 s | `503` (busy) |
+| Concurrent database use | pool size + overflow (20) requests at once; the rest wait up to 5 s | `503` (busy) |
+
+The request body limit, the token lifetime and the page sizes (50 and 200) are fixed in the code. The others are settings; see "Configuration reference".
 
 ## Health checks
 
@@ -314,12 +404,18 @@ If `/health` returns `200` but `/health/db` returns `503`, the API is up and the
 ## Test
 
 ```bash
-pytest
+pytest                  # the whole suite; the PostgreSQL integration tests skip themselves without a test database
+ruff check .            # lint
+ruff format --check .   # formatting
 ```
 
 The default test run does not need a running database. The task endpoint tests in that run use an in-memory fake session, which checks the API contract but proves nothing about PostgreSQL; persistence, ordering, locking and constraints are covered by the PostgreSQL integration tests, which are skipped unless `TEST_POSTGRES_DB` is set (see above).
 
 ## Continuous integration
+
+> **Not yet verified on GitHub.** No remote repository is configured, so the workflow has never run there. Its commands were
+> run locally (on Linux with Python 3.13 and on Windows with 3.14), and its structure is checked by tests, but GitHub's own
+> parsing and execution of it is unconfirmed. Expect to fix small problems on the first real run.
 
 `.github/workflows/ci.yml` runs on every pull request, on every push to the repository's **default branch**, and on demand (**Actions** > **CI** > **Run workflow**). No branch name is written in the file: each job checks `github.event.repository.default_branch`, so it keeps working if the default branch is not called `main`. A push to another branch starts the workflow with every job skipped, and its pull request is tested once. A newer push to a pull request cancels the run in progress; runs on the default branch are never cancelled. It needs no secrets, has read-only access to the repository, and deploys or publishes nothing.
 
@@ -329,7 +425,15 @@ The default test run does not need a running database. The task endpoint tests i
 | Tests with PostgreSQL (Python 3.13) | The whole suite against a throwaway PostgreSQL 17 service container: it waits until the database accepts connections, creates a separate `ci_test` database for the destructive tests, and fails if **any** test is skipped. |
 | Docker image and Compose stack | Both Compose files validate; the image builds and runs as a non-root user; the production stack starts (database, migration, API) and answers `/health`, `/health/db`, a `404` on `/docs` and a `403` on registration. |
 
-The Python versions are the one in the Docker image (3.13) and the one used for development (3.14). The workflow had not run on GitHub when this was written; the commands it contains were run on Linux with Python 3.13 and on Windows with 3.14, and the pinned dependencies were checked to have Linux wheels for 3.14, but the suite itself had not yet been run on Linux with 3.14, so treat the first 3.14 job as the real test of that combination. The same pinned versions are used everywhere: ruff, pytest and every transitive dependency come from `requirements-dev.txt` and `constraints.txt`, so CI and your machine run the same tools. Third-party actions are pinned to full commit SHAs (the version is in the comment beside each); update them on purpose, together with the version comments, and so are the database image digests.
+The Python versions are the one in the Docker image (3.13) and the one used for development (3.14). The pinned dependencies were
+checked to have Linux wheels for 3.14, but the suite itself has not been run on Linux with 3.14, so treat the first 3.14 job as
+the real test of that combination. The same pinned versions are used everywhere: ruff, pytest and every transitive dependency
+come from `requirements-dev.txt` and `constraints.txt`, so CI and your machine run the same tools. Third-party actions are pinned
+to full commit SHAs (the version is in the comment beside each), and the database image digests are pinned too. Update all of
+them on purpose.
+
+The workflow does not scan dependencies or images for known vulnerabilities, and nothing updates the pinned versions
+automatically.
 
 **Running the same checks locally** (PowerShell or bash, with the virtual environment active):
 
@@ -341,3 +445,28 @@ pytest                          # no database: the PostgreSQL tests skip
 ```
 
 For the PostgreSQL job, start a disposable database (see "PostgreSQL integration tests" above), create a database whose name ends in `_test`, and run `pytest` with `TEST_POSTGRES_DB` set to it. CI uses a different database name for the settings (`ci_db`) than for the tests (`ci_test`), because the test fixture refuses to run against the configured database.
+
+## Known limitations and operational notes
+
+- **One process only.** The rate limiter and the database connection limiter keep their state in memory. After a restart the
+  counters are empty, and with several processes or replicas each one counts separately. Run a single API process or container.
+- **No TLS.** The API speaks plain HTTP. Put a TLS-terminating reverse proxy in front of it, and configure `TRUSTED_PROXIES` as
+  described under "Abuse protection". No CORS headers are sent, so browsers do not let pages from other origins read its responses.
+- **Accounts and tokens.** Tokens last 30 minutes, with no refresh and no revocation. There is no password change or reset, email
+  verification, account deletion or roles. Registration is open unless you turn it off, and registering a taken name reveals that
+  it exists.
+- **Tasks.** At most 1,000 per account; no filtering, search or `updated_at`; page totals and pages are not read as one snapshot.
+- **Database.** Backups are up to you. Downgrade guards protect only online migrations, not the SQL printed by `--sql`. Renaming the
+  Compose project changes the volume name (see "Volume names changed").
+- **Supply chain.** Dependencies and base images are pinned for reproducibility but not scanned or updated automatically.
+- **Verification.** The GitHub Actions workflow has not run on GitHub, the suite has not been run on Linux with Python 3.14, and
+  the project has had no independent security review.
+
+## Security
+
+To report a vulnerability, read [SECURITY.md](SECURITY.md) first. It currently notes that no private reporting channel has been
+set up yet, so please do not publish vulnerability details in a public issue.
+
+## License
+
+Released under the [MIT License](LICENSE).
