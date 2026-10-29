@@ -318,3 +318,26 @@ pytest
 ```
 
 The default test run does not need a running database. The task endpoint tests in that run use an in-memory fake session, which checks the API contract but proves nothing about PostgreSQL; persistence, ordering, locking and constraints are covered by the PostgreSQL integration tests, which are skipped unless `TEST_POSTGRES_DB` is set (see above).
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request, on every push to the repository's **default branch**, and on demand (**Actions** > **CI** > **Run workflow**). No branch name is written in the file: each job checks `github.event.repository.default_branch`, so it keeps working if the default branch is not called `main`. A push to another branch starts the workflow with every job skipped, and its pull request is tested once. A newer push to a pull request cancels the run in progress; runs on the default branch are never cancelled. It needs no secrets, has read-only access to the repository, and deploys or publishes nothing.
+
+| Job | What it checks |
+|---|---|
+| Lint and tests (Python 3.13 and 3.14) | Dependencies install from `requirements-dev.txt` with `constraints.txt` and `pip check` passes; `ruff check`; `ruff format --check`; the whole suite **without** a database. The tests that need PostgreSQL skip themselves, and the job fails if anything else is skipped. |
+| Tests with PostgreSQL (Python 3.13) | The whole suite against a throwaway PostgreSQL 17 service container: it waits until the database accepts connections, creates a separate `ci_test` database for the destructive tests, and fails if **any** test is skipped. |
+| Docker image and Compose stack | Both Compose files validate; the image builds and runs as a non-root user; the production stack starts (database, migration, API) and answers `/health`, `/health/db`, a `404` on `/docs` and a `403` on registration. |
+
+The Python versions are the one in the Docker image (3.13) and the one used for development (3.14). The workflow had not run on GitHub when this was written; the commands it contains were run on Linux with Python 3.13 and on Windows with 3.14, and the pinned dependencies were checked to have Linux wheels for 3.14, but the suite itself had not yet been run on Linux with 3.14, so treat the first 3.14 job as the real test of that combination. The same pinned versions are used everywhere: ruff, pytest and every transitive dependency come from `requirements-dev.txt` and `constraints.txt`, so CI and your machine run the same tools. Third-party actions are pinned to full commit SHAs (the version is in the comment beside each); update them on purpose, together with the version comments, and so are the database image digests.
+
+**Running the same checks locally** (PowerShell or bash, with the virtual environment active):
+
+```bash
+pip install -r requirements-dev.txt -c constraints.txt
+ruff check .
+ruff format --check .
+pytest                          # no database: the PostgreSQL tests skip
+```
+
+For the PostgreSQL job, start a disposable database (see "PostgreSQL integration tests" above), create a database whose name ends in `_test`, and run `pytest` with `TEST_POSTGRES_DB` set to it. CI uses a different database name for the settings (`ci_db`) than for the tests (`ci_test`), because the test fixture refuses to run against the configured database.

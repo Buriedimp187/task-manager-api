@@ -1,0 +1,196 @@
+# Continuous integration: lint, tests (with and without PostgreSQL) and a container smoke test.
+#
+# Nothing here deploys or publishes anything, reads a repository secret, or needs more than read access to the
+# repository. The credentials below are throwaway values for databases that exist only for the duration of a run.
+name: CI
+
+# Pull requests (to any branch) and manual runs always run. A push runs the jobs only on the repository's default
+# branch (each job checks this), so no branch name is written here and a feature branch with a pull request is not
+# tested twice.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes its run in progress. Runs on the default branch are never cancelled, so
+# every commit there gets a result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  # Ruff and the whole test suite without a database. The tests that need PostgreSQL skip themselves here, and
+  # that is the only skip allowed. 3.13 is the Python of the Docker image; 3.14 is the one used for development.
+  lint-and-test:
+    name: Lint and tests (Python ${{ matrix.python-version }})
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints.txt
+      - name: Install dependencies (exact versions from constraints.txt)
+        run: |
+          python -m pip install -r requirements-dev.txt -c constraints.txt
+          python -m pip check
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+      - name: Ruff format
+        run: ruff format --check --diff .
+      - name: Tests without a database
+        run: |
+          python -m pytest -ra --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          # The only tests allowed to skip are the ones that need PostgreSQL (see the next job).
+          if grep '^SKIPPED' "$RUNNER_TEMP/pytest.log" | grep -v 'TEST_POSTGRES_DB'; then
+            echo "::error::Some tests were skipped for a reason other than a missing test database"
+            exit 1
+          fi
+
+  # The whole suite against a real PostgreSQL, so nothing may be skipped. The service container is thrown away with
+  # the job. The settings point at a development database that is never used, and the destructive tests run in a
+  # separate database whose name ends in _test (tests/conftest.py refuses anything else).
+  postgres-tests:
+    name: Tests with PostgreSQL
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: ci_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d ci_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: ci_db
+      TEST_POSTGRES_DB: ci_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints.txt
+      - name: Install dependencies (exact versions from constraints.txt)
+        run: |
+          python -m pip install -r requirements-dev.txt -c constraints.txt
+          python -m pip check
+      - name: Wait for PostgreSQL and create the test database
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import time
+
+          import psycopg
+
+          settings = {
+              "host": os.environ["POSTGRES_HOST"],
+              "port": os.environ["POSTGRES_PORT"],
+              "user": os.environ["POSTGRES_USER"],
+              "password": os.environ["POSTGRES_PASSWORD"],
+              "dbname": os.environ["POSTGRES_DB"],
+              "connect_timeout": 3,
+          }
+          deadline = time.monotonic() + 60
+          while True:
+              try:
+                  with psycopg.connect(**settings, autocommit=True) as connection:
+                      connection.execute(f'CREATE DATABASE "{os.environ["TEST_POSTGRES_DB"]}"')
+                  break
+              except psycopg.OperationalError as error:
+                  if time.monotonic() > deadline:
+                      sys.exit(f"PostgreSQL was not ready after 60 seconds ({type(error).__name__})")
+                  time.sleep(2)
+          print(f"PostgreSQL is ready; created {os.environ['TEST_POSTGRES_DB']}")
+          PY
+      - name: Tests with PostgreSQL
+        run: |
+          python -m pytest -ra --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          if grep -E '^SKIPPED|[0-9]+ skipped' "$RUNNER_TEMP/pytest.log"; then
+            echo "::error::Tests were skipped although a database was provided"
+            exit 1
+          fi
+
+  # Builds the production image and starts the production Compose stack end to end: database, migration, API.
+  docker:
+    name: Docker image and Compose stack
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: ci_db
+      SECRET_KEY: ci-only-signing-key-not-a-secret-0123456789
+      API_PORT: "8000"
+      COMPOSE_PROJECT_NAME: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate both Compose configurations
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose config --quiet
+      - name: Build the image and check that it does not run as root
+        run: |
+          docker build --tag task-manager-api:ci .
+          test "$(docker run --rm --entrypoint id task-manager-api:ci -u)" = "10001"
+      - name: Start the production stack
+        run: docker compose -f docker-compose.yml up -d --build --wait
+      - name: Smoke test
+        run: |
+          set -x
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health/db)" = "200"
+          # Production defaults: no interactive docs, registration closed.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/docs)" = "404"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"alice","password":"a long passphrase"}' http://127.0.0.1:8000/auth/register)" = "403"
+      - name: Show container logs
+        if: failure()
+        run: docker compose -f docker-compose.yml logs --no-color
+      - name: Remove the stack and its volume
+        if: always()
+        run: docker compose -f docker-compose.yml down --volumes --remove-orphans
