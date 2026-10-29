@@ -2,7 +2,7 @@
 
 A REST API for managing tasks, built with Python, FastAPI, PostgreSQL, SQLAlchemy and Pytest.
 
-Status: early development. Only the health endpoint exists so far.
+Status: early development. The health endpoint works. The `/tasks` routes and their request/response schemas are defined and validated, but return `501 Not Implemented` until the database phase.
 
 ## Run locally
 
