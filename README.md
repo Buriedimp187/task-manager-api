@@ -2,7 +2,7 @@
 
 A REST API for managing tasks, built with Python, FastAPI, PostgreSQL, SQLAlchemy and Pytest.
 
-Status: early development. The task endpoints (create, list, get, update, delete) store their data in PostgreSQL, the schema is managed by Alembic migrations, and there are health endpoints. There is no authentication yet, so anyone who can reach the API can read and change every task.
+Status: early development. People can register, log in, and manage their own tasks (create, list, get, update, delete). Data is stored in PostgreSQL, the schema is managed by Alembic migrations, and there are health endpoints. Each task belongs to the account that created it, and no one else can see or change it. Not done yet: rate limiting, password reset, token revocation, containers and CI.
 
 ## Run locally
 
@@ -32,6 +32,16 @@ Data is stored in the `postgres_data` Docker volume. PostgreSQL creates its user
 - `docker compose down` stops the database and keeps your data.
 - `docker compose down -v` also deletes the volume and **permanently destroys all data in it**. Use it only when you intentionally want to reset a disposable local database, for example to start over with new credentials. Never run it on a database whose contents you want to keep.
 
+### Signing key
+
+The API signs login tokens with `SECRET_KEY` from `.env`. It must be at least 32 characters, and the API **refuses to start** with a clear message if it is missing or too short (the value is never printed). The placeholder in `.env.example` is deliberately too short to work. Generate a real one with:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Keep it secret and out of Git: anyone who knows it can forge a login for any account. Changing it invalidates every token that was issued, so everyone has to log in again. Alembic does not need it, so migrations run without a signing key.
+
 ### Migrations
 
 The database schema is managed only by [Alembic](https://alembic.sqlalchemy.org/) migrations; the application never creates tables on its own. Alembic reads the same `POSTGRES_*` settings as the API (from the environment or `.env`), so no credentials are stored in `alembic.ini`. Run these from the project root with the virtual environment active and the database running:
@@ -53,9 +63,14 @@ alembic revision --autogenerate -m "describe the change"
 
 #### Downgrades can destroy data
 
-`alembic downgrade -1` reverses the latest migration and `alembic downgrade base` reverses all of them. There is only one migration so far, so both do the same thing: they drop the `tasks` table. Dropping a table permanently deletes its rows, with no prompt and no undo.
+There are two migrations: `0001` creates `tasks`, and `0002` adds `users` and the `tasks.owner_id` column. `alembic downgrade -1` reverses the latest one (dropping `users` and `owner_id`) and `alembic downgrade base` reverses both. Dropping a table permanently deletes its rows, with no prompt and no undo.
 
-To prevent accidents, the first migration's downgrade **refuses to run while the `tasks` table contains any rows**. It reports only how many there are, changes nothing, and leaves the database at the same revision. The downgrade first takes an exclusive lock on the table and holds it until it finishes, so a write from another session cannot slip in between the check and the drop: concurrent writers wait and then fail once the table is gone. The flip side is that the downgrade itself waits if another session has the table open in a long transaction. If you really mean to discard the tasks, delete them yourself first and then run the downgrade again. Open a `psql` session in the database container, run `DELETE FROM tasks;`, and leave with `\q`:
+To prevent accidents, each downgrade **refuses to run while it would destroy data**, reports only how many rows are involved, changes nothing, and leaves the database at the same revision:
+
+- `0002`'s downgrade refuses while **any account exists** (dropping `users` would destroy accounts and password hashes, and every task needs an owner).
+- `0001`'s downgrade refuses while **any task exists**.
+
+Each locks its tables exclusively until it finishes, so a write from another session cannot slip in between the check and the drop: concurrent writers wait and then fail once the table is gone. The flip side is that the downgrade itself waits if another session has the table open in a long transaction. If you really mean to discard the data, delete it yourself first and then run the downgrade again. Open a `psql` session in the database container, run `DELETE FROM tasks; DELETE FROM users;`, and leave with `\q`:
 
 ```bash
 docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
@@ -65,16 +80,20 @@ docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 alembic downgrade -1
 ```
 
-Take a backup first (for example with `pg_dump`) if there is any chance you will want the data back. **The SQL printed by `alembic downgrade ... --sql` is not protected.** Offline mode cannot lock the table or look at its rows, so the script contains no check and drops the table unconditionally; running it by hand bypasses the guard. Read future migrations before downgrading, since they may drop columns or tables too.
+Take a backup first (for example with `pg_dump`) if there is any chance you will want the data back. **The SQL printed by `alembic downgrade ... --sql` is not protected.** Offline mode cannot lock the tables or look at their rows, so the script contains no check and drops them unconditionally; running it by hand bypasses the guard. Read future migrations before downgrading, since they may drop columns or tables too.
+
+#### Upgrading a database that already has tasks
+
+Tasks created before accounts existed have no owner, and an owner cannot be invented: guessing one would hand someone's data to the wrong account. So `alembic upgrade head` **refuses** when the `tasks` table contains any rows. It reports how many, changes nothing (the whole upgrade is rolled back) and tells you what to do: export or delete those tasks (`DELETE FROM tasks;` in a `psql` session, as above), then run the upgrade again. It never assigns owners and never discards data on its own. A database with no tasks upgrades normally. (The SQL from `alembic upgrade head --sql` cannot check the data, but it is safe on this point: PostgreSQL itself rejects adding the required `owner_id` column to a table that has rows.)
 
 | Database | Holds | Safe to wipe? |
 |---|---|---|
-| Development database (`POSTGRES_DB` in `.env`) | Your tasks | **No.** Never use it as `TEST_POSTGRES_DB`. |
-| Test database (name ends in `_test`, created only for the tests) | Throwaway test rows | Yes. The tests clear it and drop `tasks`. |
+| Development database (`POSTGRES_DB` in `.env`) | Your accounts and tasks | **No.** Never use it as `TEST_POSTGRES_DB`. |
+| Test database (name ends in `_test`, created only for the tests) | Throwaway test rows | Yes. The tests clear it and drop `tasks` and `users`. |
 
 #### PostgreSQL integration tests
 
-`pytest` runs most tests without a database. The PostgreSQL integration tests (the migrations in `tests/test_migrations.py` and the task endpoints in `tests/test_tasks_postgres.py`) are skipped unless you name a **separate, disposable** test database. They run migrations up and down on it and store and delete tasks in it, so never point them at a database that holds data you care about.
+`pytest` runs most tests without a database. The PostgreSQL integration tests (the migrations in `tests/test_migrations.py`, the task endpoints in `tests/test_tasks_postgres.py` and registration and login in `tests/test_auth_postgres.py`) are skipped unless you name a **separate, disposable** test database. They run migrations up and down on it and create and delete accounts and tasks in it, so never point them at a database that holds data you care about.
 
 1. Create an empty database whose name ends in `_test`:
 
@@ -88,27 +107,70 @@ Take a backup first (for example with `pg_dump`) if there is any chance you will
    pytest
    ```
 
-The tests refuse to run if the name does not end in `_test`, if it is the configured development database (including one named only in `.env`), if the database already contains tables other than `tasks` and `alembic_version`, or if its `tasks` table already holds rows. Only after those checks pass do the tests clear any leftover rows and drop the `tasks` table when they finish, so use a database that exists only for testing.
+The tests refuse to run if the name does not end in `_test`, if it is the configured development database (including one named only in `.env`), if the database already contains tables other than `tasks`, `users` and `alembic_version`, or if it already holds any task or any account. Only after those checks pass do the tests clear any leftover rows and drop the tables when they finish, so use a database that exists only for testing.
 
 ### API
 
+With `.env` filled in (database settings and `SECRET_KEY`) and the database running:
+
 ```bash
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000/docs for the interactive documentation.
+Open http://127.0.0.1:8000/docs for the interactive documentation. Register and log in with the `/auth` endpoints, then use **Authorize** and paste the `access_token`.
 
-## Tasks API
+## Authentication
 
-All request and response bodies are JSON.
+Anyone can create an account, then log in to get an access token. The health endpoints are public; everything under `/tasks` needs a token.
 
 | Request | Purpose | Success | Other responses |
 |---|---|---|---|
-| `POST /tasks` | Create a task | `201` with the task | `422` |
-| `GET /tasks` | List every task, ordered by `id` ascending | `200` with an array (empty if there are none) | |
-| `GET /tasks/{id}` | Fetch one task | `200` with the task | `404`, `422` |
-| `PATCH /tasks/{id}` | Change some fields of a task | `200` with the updated task | `404`, `422` |
-| `DELETE /tasks/{id}` | Delete a task | `204` with no body | `404`, `422` |
+| `POST /auth/register` | Create an account | `201` with `id`, `username`, `created_at` | `409` (name taken), `422` |
+| `POST /auth/login` | Trade a username and password for an access token | `200` with the token | `401`, `422` |
+
+```http
+POST /auth/register
+{"username": "alice", "password": "a long passphrase"}
+
+201 Created
+{"id": 1, "username": "alice", "created_at": "2026-10-29T00:00:00.123456Z"}
+
+POST /auth/login
+{"username": "alice", "password": "a long passphrase"}
+
+200 OK
+{"access_token": "<token>", "token_type": "bearer", "expires_in": 1800}
+```
+
+Send the token on every task request as `Authorization: Bearer <token>`. A token lasts **30 minutes**; there are no refresh tokens, so log in again when it expires.
+
+**Usernames** are 3 to 32 characters: ASCII letters, digits, `_`, `-` and `.`. They are unique **ignoring case**, enforced by PostgreSQL itself (`Alice` and `alice` cannot both exist, even if two registrations arrive at the same moment). The case you chose is kept, and logging in ignores case. **Passwords** are 10 to 128 characters and are used exactly as typed (not trimmed). They are stored only as an Argon2id hash (19 MiB, 2 passes, 1 lane, the minimum OWASP recommends) and are never returned or logged.
+
+**What a client sees**
+
+| Situation | Response |
+|---|---|
+| Wrong password, or a username that does not exist | `401 {"detail": "Incorrect username or password"}`, identical in both cases (and a comparable amount of work is done, so timing does not tell them apart) |
+| Missing, malformed, expired, wrongly signed or otherwise invalid token, or an account that no longer exists | `401 {"detail": "Not authenticated"}` with `WWW-Authenticate: Bearer`. The reason is never given. |
+| Registering a name that is taken, in any letter case | `409 {"detail": "Username already taken"}` (registration necessarily reveals this) |
+| Invalid registration or login body | `422` **without the `input` field**, so a submitted password is never echoed back, not even inside an error about a missing field |
+
+Tokens are signed with HS256. The server fixes the accepted algorithm and requires the `sub`, `iat` and `exp` claims, so unsigned tokens, tokens signed with another key or algorithm, and tokens missing a claim are all refused.
+
+**Limitations.** There is **no rate limiting**, so logins can be tried without limit and each one costs CPU and memory to hash. Registration is open to anyone. There is no password change or reset, email verification, account deletion or roles. A token cannot be revoked before it expires (logging out is up to the client).
+
+## Tasks API
+
+All request and response bodies are JSON. **Every request needs a token** (see Authentication). Each task belongs to the account that created it, and you only ever see and change your own.
+
+| Request | Purpose | Success | Other responses |
+|---|---|---|---|
+| `POST /tasks` | Create a task | `201` with the task | `401`, `422` |
+| `GET /tasks` | List your tasks, ordered by `id` ascending | `200` with an array (empty if there are none) | `401` |
+| `GET /tasks/{id}` | Fetch one of your tasks | `200` with the task | `401`, `404`, `422` |
+| `PATCH /tasks/{id}` | Change some fields of one of your tasks | `200` with the updated task | `401`, `404`, `422` |
+| `DELETE /tasks/{id}` | Delete one of your tasks | `204` with no body | `401`, `404`, `422` |
 
 Any request can also return `503` or `500`, described under "Errors" below.
 
@@ -123,6 +185,8 @@ Any request can also return `503` or `500`, described under "Errors" below.
 | `created_at` | Read-only, timezone-aware, set by the database. |
 
 Unknown fields are rejected, so `id` and `created_at` cannot be set by a client. The NUL character (`\u0000`) is rejected in `title` and `description`, because PostgreSQL cannot store it.
+
+**Ownership.** The owner is taken from your token and nowhere else. There is no owner field: sending `owner_id`, `user_id` or any other unknown field is rejected with `422`, and a query string or header cannot choose an owner either. A task that belongs to someone else is reported as **`404`, exactly like a task that does not exist** (same status, body and headers), so ids cannot be probed. A request for someone else's task also never waits on that task's lock.
 
 ```http
 POST /tasks
@@ -150,8 +214,9 @@ PATCH /tasks/1
 
 | Status | Body | Meaning |
 |---|---|---|
-| `404` | `{"detail": "Task not found"}` | No task has that id. This includes `DELETE`. |
-| `422` | FastAPI's standard validation details, which echo the rejected value in `input` | Invalid body or id. Nothing was changed. Text that cannot be encoded as UTF-8, such as a lone surrogate (`"\ud800"` in JSON), is shown as `<unencodable text>` instead of being echoed. |
+| `401` | `{"detail": "Not authenticated"}` | No valid token. Checked before the body or the id, so an unauthenticated request never learns whether a task exists. |
+| `404` | `{"detail": "Task not found"}` | None of **your** tasks has that id: it does not exist, or it belongs to someone else. This includes `DELETE`. |
+| `422` | FastAPI's standard validation details, which echo the rejected value in `input` (except under `/auth`, see above) | Invalid body or id. Nothing was changed. Text that cannot be encoded as UTF-8, such as a lone surrogate (`"\ud800"` in JSON), is shown as `<unencodable text>` instead of being echoed. |
 | `503` | `{"detail": "Database unavailable"}` | The database could not be reached. This includes a wrong password, user or database name in the settings, which PostgreSQL's driver reports before the server can answer, so they cannot be told apart from an outage. |
 | `500` | `Internal Server Error` | Unexpected errors and missing or invalid configuration. The response never contains details or credentials. |
 

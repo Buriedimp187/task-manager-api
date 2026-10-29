@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from alembic import command
+from fakes import bearer_headers
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -27,9 +28,17 @@ from app.models import Task
 NOT_FOUND = {"detail": "Task not found"}
 
 
+def new_user(engine, username):
+    with engine.begin() as connection:
+        return connection.execute(
+            text("INSERT INTO users (username, password_hash) VALUES (:name, 'not-a-real-hash') RETURNING id"),
+            {"name": username},
+        ).scalar_one()
+
+
 @pytest.fixture
 def api(test_database):
-    """A client whose requests each get their own session on the disposable test database."""
+    """Two accounts and a client for each. Every request gets its own session on the test database."""
     engine, config = test_database
     command.upgrade(config, "head")  # the schema only ever comes from the migrations
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -39,7 +48,15 @@ def api(test_database):
             yield session
 
     app.dependency_overrides[get_db] = session_per_request
-    yield SimpleNamespace(client=TestClient(app), engine=engine, factory=factory)
+    alice, bob = new_user(engine, "alice"), new_user(engine, "bob")
+    yield SimpleNamespace(
+        client=TestClient(app, headers=bearer_headers(alice)),  # Alice, unless a test says otherwise
+        bob=TestClient(app, headers=bearer_headers(bob)),
+        alice_id=alice,
+        bob_id=bob,
+        engine=engine,
+        factory=factory,
+    )
     app.dependency_overrides.clear()
 
 
@@ -48,13 +65,14 @@ def stored_tasks(api):
         return session.query(Task).order_by(Task.id).all()
 
 
-def insert_directly(api, *ids, title="seeded"):
+def insert_directly(api, *ids, title="seeded", owner_id=None):
+    owner_id = owner_id or api.alice_id
     with api.engine.begin() as connection:
         for task_id in ids:
             connection.execute(
-                text("INSERT INTO tasks (id, title) VALUES (:id, :title)"), {"id": task_id, "title": title}
+                text("INSERT INTO tasks (id, owner_id, title) VALUES (:id, :owner, :title)"),
+                {"id": task_id, "owner": owner_id, "title": title},
             )
-
 
 # --- POST /tasks ---------------------------------------------------------------------------------
 
@@ -313,7 +331,9 @@ def test_a_lock_timeout_is_a_generic_500_not_a_503(api):
     try:
         holder.execute(text("SELECT id FROM tasks WHERE id = 1 FOR UPDATE"))  # another session holds the row
         app.dependency_overrides[get_db] = session_with_a_short_lock_timeout
-        response = TestClient(app, raise_server_exceptions=False).patch("/tasks/1", json={"title": "x"})
+        response = TestClient(app, raise_server_exceptions=False, headers=api.client.headers).patch(
+            "/tasks/1", json={"title": "x"}
+        )
     finally:
         holder.rollback()
         holder.close()
@@ -390,13 +410,13 @@ def paused_after_the_row_lock():
         event.remove(Engine, "after_cursor_execute", pause)
 
 
-def in_thread(name, call):
+def in_thread(api, name, call):
     """Run `call` (which issues one request) in a named thread; returns the thread and its outcome."""
     outcome = {}
 
     def target():
         try:
-            outcome["response"] = call(TestClient(app))
+            outcome["response"] = call(TestClient(app, headers=api.client.headers))
         except Exception as error:  # reported by the test, from the main thread
             outcome["error"] = error
 
@@ -409,9 +429,9 @@ def test_a_delete_waits_for_a_patch_that_holds_the_row_and_neither_fails(api):
     task_id = api.client.post("/tasks", json={"title": "contended"}).json()["id"]
 
     with paused_after_the_row_lock() as (locked, release):
-        patcher, patch = in_thread("patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "patched"}))
+        patcher, patch = in_thread(api, "patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "patched"}))
         assert locked.wait(timeout=20), "the PATCH never reached its row lock"
-        deleter, delete = in_thread("delete-thread", lambda c: c.delete(f"/tasks/{task_id}"))
+        deleter, delete = in_thread(api, "delete-thread", lambda c: c.delete(f"/tasks/{task_id}"))
         time.sleep(1)
         assert deleter.is_alive(), "the DELETE should be waiting for the row lock"
         release.set()
@@ -428,9 +448,9 @@ def test_a_patch_that_loses_the_race_to_a_delete_gets_404_not_500(api):
     task_id = api.client.post("/tasks", json={"title": "contended"}).json()["id"]
 
     with paused_after_the_row_lock() as (locked, release):
-        deleter, delete = in_thread("delete-thread", lambda c: c.delete(f"/tasks/{task_id}"))
+        deleter, delete = in_thread(api, "delete-thread", lambda c: c.delete(f"/tasks/{task_id}"))
         assert locked.wait(timeout=20), "the DELETE never reached its row lock"
-        patcher, patch = in_thread("patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "late"}))
+        patcher, patch = in_thread(api, "patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "late"}))
         time.sleep(1)
         assert patcher.is_alive(), "the PATCH should be waiting for the row lock"
         release.set()
@@ -447,7 +467,7 @@ def test_reads_are_not_blocked_by_a_patch_in_progress(api):
     task_id = api.client.post("/tasks", json={"title": "before"}).json()["id"]
 
     with paused_after_the_row_lock() as (locked, release):
-        patcher, patch = in_thread("patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "after"}))
+        patcher, patch = in_thread(api, "patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "after"}))
         assert locked.wait(timeout=20)
         started = time.monotonic()
         during = api.client.get(f"/tasks/{task_id}")
@@ -459,3 +479,179 @@ def test_reads_are_not_blocked_by_a_patch_in_progress(api):
     assert elapsed < 5
     assert patch["response"].status_code == 200
     assert api.client.get(f"/tasks/{task_id}").json()["title"] == "after"
+
+
+# --- Ownership: the same guarantees against real PostgreSQL -----------------------------------------
+
+
+def snapshot(api):
+    """Every task row, completely, so 'nothing changed' can be asserted exactly."""
+    with api.engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT id, owner_id, title, description, status, created_at FROM tasks ORDER BY id")
+        )
+        return [tuple(row) for row in rows]
+
+
+def test_the_owner_is_stored_from_the_token(api):
+    api.client.post("/tasks", json={"title": "alice's"})
+    api.bob.post("/tasks", json={"title": "bob's"})
+
+    assert {task.title: task.owner_id for task in stored_tasks(api)} == {
+        "alice's": api.alice_id,
+        "bob's": api.bob_id,
+    }
+
+
+def test_each_user_lists_only_their_own_tasks(api):
+    for n in range(3):
+        api.client.post("/tasks", json={"title": f"alice {n}"})
+        api.bob.post("/tasks", json={"title": f"bob {n}"})
+
+    assert [t["title"] for t in api.client.get("/tasks").json()] == ["alice 0", "alice 1", "alice 2"]
+    assert [t["title"] for t in api.bob.get("/tasks").json()] == ["bob 0", "bob 1", "bob 2"]
+
+
+def test_another_users_task_cannot_be_read_changed_or_deleted(api):
+    alices = api.client.post("/tasks", json={"title": "private", "description": "secret"}).json()
+    before = snapshot(api)
+
+    responses = [
+        api.bob.get(f"/tasks/{alices['id']}"),
+        api.bob.patch(f"/tasks/{alices['id']}", json={"title": "hijacked", "status": "done", "description": None}),
+        api.bob.delete(f"/tasks/{alices['id']}"),
+    ]
+
+    assert [(r.status_code, r.json()) for r in responses] == [(404, NOT_FOUND)] * 3
+    assert snapshot(api) == before  # not a single column of any row changed
+    assert api.client.get(f"/tasks/{alices['id']}").json() == alices
+
+
+def test_a_foreign_task_looks_exactly_like_a_missing_one(api):
+    alices = api.client.post("/tasks", json={"title": "private"}).json()
+    missing = alices["id"] + 1000
+
+    for method, kwargs in [("get", {}), ("patch", {"json": {"title": "x"}}), ("delete", {})]:
+        foreign = getattr(api.bob, method)(f"/tasks/{alices['id']}", **kwargs)
+        absent = getattr(api.bob, method)(f"/tasks/{missing}", **kwargs)
+
+        assert foreign.status_code == absent.status_code == 404, method
+        assert foreign.content == absent.content, method
+        assert dict(foreign.headers) == dict(absent.headers), method
+
+
+def test_guessing_ids_never_reveals_anothers_tasks(api):
+    created = [api.client.post("/tasks", json={"title": f"alice {n}"}).json()["id"] for n in range(5)]
+
+    results = [api.bob.get(f"/tasks/{task_id}").status_code for task_id in range(1, max(created) + 3)]
+
+    assert set(results) == {404}
+    assert api.bob.get("/tasks").json() == []
+
+
+@pytest.mark.parametrize("field", ["owner_id", "user_id", "owner", "ownerId"])
+def test_forged_ownership_is_rejected_and_changes_nothing(api, field):
+    alices = api.client.post("/tasks", json={"title": "mine"}).json()
+    before = snapshot(api)
+
+    create = api.bob.post("/tasks", json={"title": "forged", field: api.alice_id})
+    update = api.bob.patch(f"/tasks/{alices['id']}", json={field: api.bob_id})
+    steal = api.client.patch(f"/tasks/{alices['id']}", json={field: api.bob_id})
+
+    # Rejected by validation, before any lookup, so the answer does not depend on who owns what.
+    assert (create.status_code, update.status_code, steal.status_code) == (422, 422, 422)
+    assert snapshot(api) == before
+
+
+def test_a_forged_query_string_or_header_cannot_choose_the_owner(api):
+    response = api.bob.post(
+        "/tasks?owner_id=%d" % api.alice_id,
+        json={"title": "bob's"},
+        headers={"X-Owner-Id": str(api.alice_id), "X-User-Id": str(api.alice_id)},
+    )
+
+    assert response.status_code == 201
+    [task] = stored_tasks(api)
+    assert task.owner_id == api.bob_id
+
+
+def test_a_request_for_a_foreign_task_does_not_wait_for_the_owners_row_lock(api):
+    # The owner test is part of the locking SELECT, so a task that is not yours is never even looked at
+    # under lock: no waiting, and nothing to learn from the timing.
+    task_id = api.client.post("/tasks", json={"title": "contended"}).json()["id"]
+
+    with paused_after_the_row_lock() as (locked, release):
+        patcher, patch = in_thread(api, "alice-patch", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "new"}))
+        assert locked.wait(timeout=20), "Alice's PATCH never reached its row lock"
+        started = time.monotonic()
+        foreign = api.bob.patch(f"/tasks/{task_id}", json={"title": "hijack"})
+        foreign_delete = api.bob.delete(f"/tasks/{task_id}")
+        elapsed = time.monotonic() - started
+        release.set()
+        patcher.join(timeout=30)
+
+    assert (foreign.status_code, foreign_delete.status_code) == (404, 404)
+    assert elapsed < 5  # it did not queue behind Alice's lock
+    assert patch["response"].status_code == 200
+    assert api.client.get(f"/tasks/{task_id}").json()["title"] == "new"
+
+
+def test_different_users_never_block_each_other(api):
+    mine = api.client.post("/tasks", json={"title": "mine"}).json()["id"]
+    theirs = api.bob.post("/tasks", json={"title": "theirs"}).json()["id"]
+
+    with paused_after_the_row_lock() as (locked, release):
+        patcher, patch = in_thread(api, "alice-patch", lambda c: c.patch(f"/tasks/{mine}", json={"title": "edited"}))
+        assert locked.wait(timeout=20)
+        started = time.monotonic()
+        bobs = api.bob.patch(f"/tasks/{theirs}", json={"title": "edited too"})
+        elapsed = time.monotonic() - started
+        release.set()
+        patcher.join(timeout=30)
+
+    assert bobs.status_code == 200 and elapsed < 5  # row locks, not table locks
+    assert patch["response"].status_code == 200
+
+
+def test_concurrent_attempts_on_one_task_by_both_users_leave_it_with_its_owner(api):
+    task_id = api.client.post("/tasks", json={"title": "contended"}).json()["id"]
+    outcomes = []
+
+    def attack(client):
+        for _ in range(10):
+            outcomes.append(client.patch(f"/tasks/{task_id}", json={"title": "bob was here"}).status_code)
+            outcomes.append(client.delete(f"/tasks/{task_id}").status_code)
+
+    workers = [threading.Thread(target=attack, args=(TestClient(app, headers=api.bob.headers),)) for _ in range(4)]
+    editor = threading.Thread(
+        target=lambda: [api.client.patch(f"/tasks/{task_id}", json={"status": "in_progress"}) for _ in range(10)]
+    )
+    for thread in [*workers, editor]:
+        thread.start()
+    for thread in [*workers, editor]:
+        thread.join(timeout=60)
+
+    assert set(outcomes) == {404}  # every one of Bob's 80 attempts was refused
+    [task] = stored_tasks(api)
+    assert task.owner_id == api.alice_id and task.title == "contended"
+
+
+def test_a_token_stops_working_when_its_account_is_deleted(api):
+    api.bob.post("/tasks", json={"title": "bob's"})
+    with api.engine.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": api.bob_id})
+
+    assert api.bob.get("/tasks").status_code == 401
+    assert api.client.get("/tasks").status_code == 200  # Alice is unaffected
+    assert [task.owner_id for task in stored_tasks(api)] == []  # Bob's tasks went with the account
+
+
+def test_rejected_requests_release_their_connections(api):
+    anonymous = TestClient(app)
+    for _ in range(5):
+        anonymous.get("/tasks")  # 401
+        api.bob.get("/tasks/9999")  # 404
+        api.client.post("/tasks", json={})  # 422
+        TestClient(app, headers={"Authorization": "Bearer nonsense"}).get("/tasks")  # 401
+
+    assert api.engine.pool.checkedout() == 0

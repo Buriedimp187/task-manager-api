@@ -1,7 +1,9 @@
-from datetime import UTC, datetime
-from types import SimpleNamespace
+"""The task endpoints' contract, for an authenticated user, against the in-memory fake database."""
+
+from datetime import datetime
 
 import pytest
+from fakes import FakeSession, bearer_headers
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -13,51 +15,6 @@ from app.schemas import TaskStatus
 NOT_FOUND = {"detail": "Task not found"}
 
 
-class FakeSession:
-    """In-memory stand-in for a SQLAlchemy session: enough for the task routes, not a database.
-
-    Real persistence, locking and constraints are covered by the PostgreSQL tests, never by this fake.
-    """
-
-    def __init__(self):
-        self.rows = {}  # committed tasks by id
-        self.pending = []  # added, not committed yet
-        self.removed = []  # deleted, not committed yet
-        self.calls = []
-        self.statement = None
-        self.next_id = 1
-
-    def add(self, task):
-        self.calls.append("add")
-        self.pending.append(task)
-
-    def get(self, model, key, with_for_update=False):
-        self.calls.append(f"get:{key}:for_update={with_for_update}")
-        return self.rows.get(key)
-
-    def scalars(self, statement):
-        self.calls.append("scalars")
-        self.statement = str(statement)
-        return SimpleNamespace(all=lambda: [self.rows[key] for key in sorted(self.rows)])
-
-    def delete(self, task):
-        self.calls.append("delete")
-        self.removed.append(task)
-
-    def commit(self):
-        self.calls.append("commit")
-        for task in self.pending:  # the server would fill these in
-            task.id = self.next_id
-            self.next_id += 1
-            task.status = task.status or TaskStatus.todo
-            task.created_at = datetime.now(UTC)
-            self.rows[task.id] = task
-        for task in self.removed:
-            self.rows.pop(task.id, None)
-        self.pending.clear()
-        self.removed.clear()
-
-
 @pytest.fixture
 def db():
     session = FakeSession()
@@ -67,14 +24,24 @@ def db():
 
 
 @pytest.fixture
-def client(db):
-    return TestClient(app)
+def alice(db):
+    return db.add_user("alice")
+
+
+@pytest.fixture
+def client(alice):
+    return TestClient(app, headers=bearer_headers(alice.id))
 
 
 def create(client, **fields):
     response = client.post("/tasks", json={"title": "A task", **fields})
     assert response.status_code == 201
     return response.json()
+
+
+def writes(db):
+    """What the request did to the database, ignoring the user lookup that authentication performs."""
+    return [call for call in db.calls if not call.startswith("get:User")]
 
 
 # --- OpenAPI contract ----------------------------------------------------------------------------
@@ -127,15 +94,25 @@ def test_openapi_documents_404_exactly_where_a_task_is_looked_up(spec):
     assert "404" not in operation(spec, "get", "/tasks")["responses"]
 
 
-def test_openapi_documents_503_on_every_database_route(spec):
+def test_openapi_documents_401_and_503_on_every_task_route(spec):
     for path, methods in spec["paths"].items():
         if not path.startswith("/tasks"):
             continue
         for method, item in methods.items():
-            assert schema_ref(item["responses"]["503"]) == {"$ref": "#/components/schemas/ErrorResponse"}, (
-                method,
-                path,
-            )
+            for status in ("401", "503"):
+                assert schema_ref(item["responses"][status]) == {"$ref": "#/components/schemas/ErrorResponse"}, (
+                    method,
+                    path,
+                    status,
+                )
+
+
+def test_openapi_declares_bearer_authentication_on_task_routes_only(spec):
+    assert spec["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
+    for path, methods in spec["paths"].items():
+        for method, item in methods.items():
+            requires_token = bool(item.get("security"))
+            assert requires_token == path.startswith("/tasks"), (method, path)
 
 
 def test_openapi_error_response_shape(spec):
@@ -147,13 +124,17 @@ def test_openapi_error_response_shape(spec):
 
 def test_openapi_documents_422_only_where_there_is_input_to_validate(spec):
     assert "422" not in operation(spec, "get", "/tasks")["responses"]  # no parameters, no body
-    for method, path in [("post", "/tasks"), ("get", "/tasks/{task_id}"), ("patch", "/tasks/{task_id}"),
-                         ("delete", "/tasks/{task_id}")]:
+    for method, path in [
+        ("post", "/tasks"),
+        ("get", "/tasks/{task_id}"),
+        ("patch", "/tasks/{task_id}"),
+        ("delete", "/tasks/{task_id}"),
+    ]:
         assert "422" in operation(spec, method, path)["responses"]
 
 
 def test_openapi_list_endpoint_has_no_query_parameters(spec):
-    # Pagination and filtering are deliberately out of scope for this phase.
+    # Pagination and filtering are deliberately out of scope for now.
     assert operation(spec, "get", "/tasks").get("parameters", []) == []
 
 
@@ -173,6 +154,13 @@ def test_openapi_request_bodies_reject_unknown_fields(spec):
     assert schemas["TaskCreate"]["required"] == ["title"]
 
 
+def test_the_task_schemas_expose_no_owner_field(spec):
+    schemas = spec["components"]["schemas"]
+
+    for name in ("TaskCreate", "TaskUpdate", "TaskRead"):
+        assert not {"owner_id", "owner", "user_id"} & set(schemas[name]["properties"]), name
+
+
 # --- POST /tasks ---------------------------------------------------------------------------------
 
 
@@ -187,7 +175,7 @@ def test_create_returns_201_with_the_stored_task(client, db):
     assert body["status"] == "todo"
     assert datetime.fromisoformat(body["created_at"]).tzinfo is not None
     assert set(body) == {"id", "title", "description", "status", "created_at"}
-    assert db.calls == ["add", "commit"]
+    assert writes(db) == ["add:Task", "commit"]
 
 
 def test_create_stores_the_supplied_fields(client):
@@ -218,16 +206,16 @@ def test_create_normalizes_a_blank_description_to_null(client, blank):
         {"title": None},
     ],
 )
-def test_create_rejects_invalid_bodies_before_touching_the_database(client, db, payload):
+def test_create_rejects_invalid_bodies_without_writing(client, db, payload):
     response = client.post("/tasks", json=payload)
 
     assert response.status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
 
 
-def post_raw(content, method="POST", path="/tasks"):
+def post_raw(content, headers, method="POST", path="/tasks"):
     """Send a raw JSON body through a client that reports a crash as a 500 instead of raising."""
-    lenient = TestClient(app, raise_server_exceptions=False)
+    lenient = TestClient(app, raise_server_exceptions=False, headers=headers)
     return lenient.request(method, path, content=content, headers={"content-type": "application/json"})
 
 
@@ -241,29 +229,29 @@ def post_raw(content, method="POST", path="/tasks"):
         '{"title": ["\\ud800"]}',  # nested in another structure
     ],
 )
-def test_create_rejects_a_lone_surrogate_with_422_not_a_server_error(db, body):
-    response = post_raw(body)
+def test_create_rejects_a_lone_surrogate_with_422_not_a_server_error(client, db, body):
+    response = post_raw(body, client.headers)
 
     assert response.status_code == 422
     response.content.decode("utf-8")  # the body is fully encodable, so serialization did not crash
     assert response.json()["detail"]
     assert not any(0xD800 <= ord(char) <= 0xDFFF for char in response.text)
     assert "<unencodable text>" in response.text  # the rejected text is replaced, never echoed
-    assert db.calls == []
+    assert writes(db) == []
 
 
 def test_patch_rejects_a_lone_surrogate_with_422(client, db):
     created = create(client)
     db.calls.clear()
 
-    response = post_raw('{"title": "lone \\ud800 surrogate"}', method="PATCH", path=f"/tasks/{created['id']}")
+    response = post_raw('{"title": "lone \\ud800 surrogate"}', client.headers, "PATCH", f"/tasks/{created['id']}")
 
     assert response.status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
 
 
-def test_the_error_for_a_lone_surrogate_keeps_the_usual_shape(db):
-    [error] = post_raw('{"title": "lone \\ud800 surrogate"}').json()["detail"]
+def test_the_error_for_a_lone_surrogate_keeps_the_usual_shape(client):
+    [error] = post_raw('{"title": "lone \\ud800 surrogate"}', client.headers).json()["detail"]
 
     assert set(error) == {"type", "loc", "msg", "input"}
     assert error["loc"] == ["body", "title"]
@@ -272,7 +260,9 @@ def test_the_error_for_a_lone_surrogate_keeps_the_usual_shape(db):
 
 
 def test_a_valid_surrogate_pair_is_just_an_emoji(client):
-    response = client.post("/tasks", content='{"title": "ok \\ud83d\\ude00"}', headers={"content-type": "application/json"})
+    response = client.post(
+        "/tasks", content='{"title": "ok \\ud83d\\ude00"}', headers={"content-type": "application/json"}
+    )
 
     assert response.status_code == 201
     assert response.json()["title"] == "ok \U0001f600"
@@ -302,14 +292,14 @@ ORDINARY_INVALID_REQUESTS = [
 
 
 @pytest.mark.parametrize("method, path, kwargs", ORDINARY_INVALID_REQUESTS)
-def test_ordinary_validation_errors_are_identical_to_fastapis_default(db, method, path, kwargs):
+def test_ordinary_validation_errors_are_identical_to_fastapis_default(db, client, method, path, kwargs):
     # A second app with the same routes but without our handler is the reference for the old behaviour.
     reference = FastAPI()
     reference.include_router(tasks.router)
     reference.dependency_overrides[get_db] = lambda: db
 
-    ours = TestClient(app).request(method, path, **kwargs)
-    default = TestClient(reference).request(method, path, **kwargs)
+    ours = client.request(method, path, **kwargs)
+    default = TestClient(reference, headers=client.headers).request(method, path, **kwargs)
 
     assert ours.status_code == default.status_code == 422
     assert ours.content == default.content
@@ -331,7 +321,7 @@ def test_create_rejects_a_body_that_is_not_json(client, db):
     response = client.post("/tasks", content="not json", headers={"content-type": "application/json"})
 
     assert response.status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
 
 
 # --- GET /tasks ----------------------------------------------------------------------------------
@@ -360,7 +350,7 @@ def test_list_returns_tasks_in_ascending_id_order(client, db):
 def test_list_takes_no_query_parameters_and_does_not_write(client, db):
     client.get("/tasks?limit=1&offset=5")  # unknown parameters are ignored, not interpreted
 
-    assert db.calls == ["scalars"]
+    assert writes(db) == ["scalars:Task"]
 
 
 # --- GET /tasks/{id} -----------------------------------------------------------------------------
@@ -373,7 +363,7 @@ def test_get_returns_the_task(client, db):
 
     assert response.status_code == 200
     assert response.json() == created
-    assert db.calls[-1] == "get:1:for_update=False"  # reads take no row lock
+    assert writes(db)[-1] == "scalar:Task:for_update=False"  # reads take no row lock
 
 
 def test_get_returns_404_for_a_missing_task(client, db):
@@ -381,7 +371,7 @@ def test_get_returns_404_for_a_missing_task(client, db):
 
     assert response.status_code == 404
     assert response.json() == NOT_FOUND
-    assert db.calls == ["get:42:for_update=False"]  # nothing is written
+    assert writes(db) == ["scalar:Task:for_update=False"]  # nothing is written
 
 
 # --- PATCH /tasks/{id} ---------------------------------------------------------------------------
@@ -398,7 +388,7 @@ def test_patch_changes_only_the_fields_that_were_sent(client, db):
     assert body["description"] == "Keep me"  # omitted: untouched
     assert body["status"] == "in_progress"  # omitted: untouched
     assert body["id"] == created["id"] and body["created_at"] == created["created_at"]
-    assert db.calls[-2:] == ["get:1:for_update=True", "commit"]  # row locked, then committed
+    assert writes(db)[-2:] == ["scalar:Task:for_update=True", "commit"]  # row locked, then committed
 
 
 def test_patch_with_null_description_clears_it(client):
@@ -445,7 +435,7 @@ def test_patch_returns_404_for_a_missing_task_and_writes_nothing(client, db):
 
     assert response.status_code == 404
     assert response.json() == NOT_FOUND
-    assert db.calls == ["get:42:for_update=True"]  # no commit
+    assert writes(db) == ["scalar:Task:for_update=True"]  # no commit
 
 
 @pytest.mark.parametrize(
@@ -466,14 +456,14 @@ def test_patch_returns_404_for_a_missing_task_and_writes_nothing(client, db):
         {"title": "ok", "unknown": 1},
     ],
 )
-def test_patch_rejects_invalid_bodies_before_touching_the_database(client, db, payload):
+def test_patch_rejects_invalid_bodies_without_writing(client, db, payload):
     created = create(client)
     db.calls.clear()
 
     response = client.patch(f"/tasks/{created['id']}", json=payload)
 
     assert response.status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
 
 
 # --- DELETE /tasks/{id} --------------------------------------------------------------------------
@@ -486,7 +476,7 @@ def test_delete_returns_204_with_no_body_and_removes_the_task(client, db):
 
     assert response.status_code == 204
     assert response.content == b""
-    assert db.calls[-3:] == ["get:1:for_update=True", "delete", "commit"]
+    assert writes(db)[-3:] == ["scalar:Task:for_update=True", "delete", "commit"]
     assert client.get(f"/tasks/{created['id']}").status_code == 404
     assert client.get("/tasks").json() == []
 
@@ -496,7 +486,7 @@ def test_delete_returns_404_for_a_missing_task_and_deletes_nothing(client, db):
 
     assert response.status_code == 404
     assert response.json() == NOT_FOUND
-    assert db.calls == ["get:42:for_update=True"]  # no delete, no commit
+    assert writes(db) == ["scalar:Task:for_update=True"]  # no delete, no commit
 
 
 def test_deleting_twice_is_204_then_404(client):
@@ -521,7 +511,7 @@ def test_task_id_must_be_a_positive_integer(client, db):
     assert client.get("/tasks/0").status_code == 422
     assert client.get("/tasks/-1").status_code == 422
     assert client.get("/tasks/abc").status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
 
 
 def test_task_id_accepts_the_largest_postgres_integer(client):
@@ -534,4 +524,8 @@ def test_task_id_above_the_postgres_integer_range_is_rejected(client, db):
     assert client.get(f"/tasks/{too_large}").status_code == 422
     assert client.patch(f"/tasks/{too_large}", json={"status": "done"}).status_code == 422
     assert client.delete(f"/tasks/{too_large}").status_code == 422
-    assert db.calls == []
+    assert writes(db) == []
+
+
+def test_task_status_values_are_unchanged():
+    assert [status.value for status in TaskStatus] == ["todo", "in_progress", "done"]

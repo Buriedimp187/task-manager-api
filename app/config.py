@@ -1,8 +1,10 @@
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
+
+MIN_SECRET_KEY_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -29,6 +31,31 @@ class Settings(BaseSettings):
         )
 
 
+class AuthSettings(BaseSettings):
+    """The token-signing secret. Kept apart from the database settings so that tools which only need
+    the database, such as Alembic, do not require it."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+
+    secret_key: SecretStr
+
+    @field_validator("secret_key")
+    @classmethod
+    def secret_key_must_be_long_enough(cls, value: SecretStr) -> SecretStr:
+        # The message never includes the value.
+        if len(value.get_secret_value()) < MIN_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"SECRET_KEY must be at least {MIN_SECRET_KEY_LENGTH} characters long. "
+                'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        return value
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_auth_settings() -> AuthSettings:
+    return AuthSettings()

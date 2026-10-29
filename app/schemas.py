@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -29,6 +29,19 @@ Description = Annotated[
     Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000), AfterValidator(reject_nul)]
     | None,
     AfterValidator(lambda value: value or None),
+]
+
+
+# ASCII only, so the database's case-insensitive uniqueness (lower(username)) is unambiguous.
+# Mirrored by a CHECK constraint on users.username.
+Username = Annotated[str, StringConstraints(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")]
+# Not trimmed: a password is used exactly as typed. The upper bound keeps hashing cost bounded.
+# (Pydantic's constrained strings also reject a lone surrogate, which could not be hashed; a test
+# pins that, so it cannot silently change into a 500.)
+Password = Annotated[
+    str,
+    StringConstraints(min_length=10, max_length=128),
+    AfterValidator(reject_nul),
 ]
 
 
@@ -64,6 +77,36 @@ class TaskUpdate(BaseModel):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
         return self
+
+
+class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: Username
+    password: Password
+
+
+class LoginRequest(BaseModel):
+    """Deliberately lenient: the rules for new passwords must not reveal anything about existing ones."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    password: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(gt=0)
+    username: str
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int = Field(description="Seconds until the token expires")
 
 
 class ErrorResponse(BaseModel):

@@ -1,10 +1,12 @@
 """How the task routes report database failures: 503 for outages, a generic 500 for everything else."""
 
 import logging
+from types import SimpleNamespace
 
 import psycopg
 import psycopg.errors
 import pytest
+from fakes import bearer_headers
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.exc import (
@@ -22,6 +24,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.config import get_settings
 from app.database import get_db
 from app.main import app, is_connectivity_failure
+from app.models import User
 
 SECRET_HOST = "db.internal.example"
 SECRET_USER = "svc_account"
@@ -45,10 +48,12 @@ def operational_error(sqlstate=None, **kwargs):
 
 
 class FailingSession:
-    """Raises the given error on the first database call, like a database that is down."""
+    """Raises the given error on the first database call after authentication, like a database that fails
+    mid-request. The user lookup succeeds (so the request is authenticated) unless `fail_lookup` is set."""
 
-    def __init__(self, error):
+    def __init__(self, error, fail_lookup=False):
         self.error = error
+        self.fail_lookup = fail_lookup
         self.calls = []
 
     def _fail(self, name):
@@ -58,8 +63,13 @@ class FailingSession:
     def add(self, task):
         self.calls.append("add")
 
-    def get(self, *args, **kwargs):
+    def get(self, model, key):
+        if model is User and not self.fail_lookup:
+            return SimpleNamespace(id=key)  # authentication succeeds
         self._fail("get")
+
+    def scalar(self, *args, **kwargs):
+        self._fail("scalar")
 
     def scalars(self, *args, **kwargs):
         self._fail("scalars")
@@ -70,10 +80,10 @@ class FailingSession:
 
 @pytest.fixture
 def failing():
-    def use(error):
-        session = FailingSession(error)
+    def use(error, fail_lookup=False):
+        session = FailingSession(error, fail_lookup)
         app.dependency_overrides[get_db] = lambda: session
-        return TestClient(app, raise_server_exceptions=False)
+        return TestClient(app, raise_server_exceptions=False, headers=bearer_headers(1))
 
     yield use
     app.dependency_overrides.clear()
@@ -99,6 +109,27 @@ def test_a_connectivity_failure_is_a_generic_503(failing, method, path, kwargs):
     assert response.json() == UNAVAILABLE
     for secret in (SECRET_HOST, SECRET_USER, SECRET_PASSWORD, "FATAL", "password"):
         assert secret not in response.text
+
+
+def test_an_outage_while_checking_the_token_is_also_503(failing):
+    client = failing(operational_error(sqlstate=None), fail_lookup=True)
+
+    response = client.get("/tasks")
+
+    assert (response.status_code, response.json()) == (503, UNAVAILABLE)
+
+
+def test_an_outage_during_login_or_registration_is_503(db_down):
+    for path in ("/auth/login", "/auth/register"):
+        response = db_down.post(path, json={"username": "alice", "password": "a perfectly fine password"})
+
+        assert (response.status_code, response.json()) == (503, UNAVAILABLE), path
+        assert "perfectly fine password" not in response.text
+
+
+@pytest.fixture
+def db_down(failing):
+    return failing(operational_error(sqlstate=None), fail_lookup=True)
 
 
 @pytest.mark.parametrize("sqlstate", ["08006", "08001", "57P01", "57P02", "57P03", "53300"])
@@ -230,7 +261,7 @@ def test_an_unreachable_database_gives_503_through_the_real_driver(caplog):
     app.dependency_overrides[get_db] = session_per_request
     try:
         with caplog.at_level(logging.WARNING, logger="app.main"):
-            response = TestClient(app, raise_server_exceptions=False).get("/tasks")
+            response = TestClient(app, raise_server_exceptions=False, headers=bearer_headers(1)).get("/tasks")
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
@@ -251,7 +282,7 @@ def test_missing_configuration_stays_a_generic_500_not_a_503(monkeypatch, tmp_pa
     get_engine.cache_clear()
     get_session_factory.cache_clear()
     try:
-        response = TestClient(app, raise_server_exceptions=False).get("/tasks")
+        response = TestClient(app, raise_server_exceptions=False, headers=bearer_headers(1)).get("/tasks")
     finally:
         get_settings.cache_clear()
 

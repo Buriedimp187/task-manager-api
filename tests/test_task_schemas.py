@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import TaskCreate, TaskStatus, TaskUpdate
+from app.schemas import LoginRequest, TaskCreate, TaskStatus, TaskUpdate, TokenResponse, UserCreate
 
 
 def test_create_applies_defaults():
@@ -143,3 +143,41 @@ def test_update_rejects_null_for_required_fields(field):
 def test_update_rejects_unknown_fields():
     with pytest.raises(ValidationError):
         TaskUpdate(title="New title", created_at="2026-01-01T00:00:00")
+
+
+# --- Authentication schemas -----------------------------------------------------------------------
+
+
+def test_user_create_accepts_a_valid_registration():
+    user = UserCreate(username="Alice_1", password="a perfectly fine password")
+
+    assert (user.username, user.password) == ("Alice_1", "a perfectly fine password")
+
+
+def test_a_password_is_used_exactly_as_typed():
+    assert UserCreate(username="alice", password="  padded password  ").password == "  padded password  "
+
+
+def test_user_create_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        UserCreate(username="alice", password="a perfectly fine password", is_admin=True)
+
+
+def test_user_create_error_messages_do_not_contain_the_password():
+    with pytest.raises(ValidationError) as error:
+        UserCreate(username="x", password="short\x00")
+
+    assert "short" not in " ".join(str(item["msg"]) for item in error.value.errors())
+
+
+def test_login_request_is_deliberately_lenient():
+    # The rules for new passwords must not reveal anything about the passwords that exist.
+    assert LoginRequest(username="a", password="b").password == "b"
+    with pytest.raises(ValidationError):
+        LoginRequest(username="a", password="")
+
+
+def test_token_response_is_a_bearer_token():
+    assert TokenResponse(access_token="t", expires_in=1800).token_type == "bearer"
+    with pytest.raises(ValidationError):
+        TokenResponse(access_token="t", token_type="basic", expires_in=1)
