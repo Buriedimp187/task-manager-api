@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.body_limit import BodySizeLimitMiddleware
 from app.config import get_auth_settings
 from app.database import get_db
 from app.routers import auth, tasks
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Task Manager API", lifespan=lifespan)
+app.add_middleware(BodySizeLimitMiddleware)
 app.include_router(auth.router)
 app.include_router(tasks.router)
 
