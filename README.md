@@ -132,7 +132,7 @@ With `.env` filled in (database settings and `SECRET_KEY`) and the database runn
 
 ```bash
 alembic upgrade head
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-proxy-headers
 ```
 
 Open http://127.0.0.1:8000/docs for the interactive documentation. Register and log in with the `/auth` endpoints, then use **Authorize** and paste the `access_token`.
@@ -143,8 +143,8 @@ Anyone can create an account, then log in to get an access token. The health end
 
 | Request | Purpose | Success | Other responses |
 |---|---|---|---|
-| `POST /auth/register` | Create an account | `201` with `id`, `username`, `created_at` | `409` (name taken), `422` |
-| `POST /auth/login` | Trade a username and password for an access token | `200` with the token | `401`, `422` |
+| `POST /auth/register` | Create an account | `201` with `id`, `username`, `created_at` | `403` (registration disabled), `409` (name taken), `422`, `429` |
+| `POST /auth/login` | Trade a username and password for an access token | `200` with the token | `401`, `422`, `429` |
 
 ```http
 POST /auth/register
@@ -161,6 +161,28 @@ POST /auth/login
 ```
 
 Send the token on every task request as `Authorization: Bearer <token>`. A token lasts **30 minutes**; there are no refresh tokens, so log in again when it expires.
+
+### Abuse protection
+
+Login and registration are rate limited per client address, before any password is hashed or the database is touched. Every limit is configurable (see `.env.example`):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `LOGIN_IP_LIMIT` / `LOGIN_IP_WINDOW_SECONDS` | 10 / 60 | Login attempts per address (all usernames). |
+| `LOGIN_USER_LIMIT` / `LOGIN_USER_WINDOW_SECONDS` | 5 / 60 | Attempts per address and username (case-insensitive). A successful login clears it. |
+| `REGISTER_IP_LIMIT` / `REGISTER_IP_WINDOW_SECONDS` | 5 / 3600 | Registration attempts per address, successful or not. |
+| `REGISTRATION_ENABLED` | `true` | `false` makes `POST /auth/register` answer `403`; login is unaffected. Set it to `false` in production once the accounts exist. |
+| `TRUSTED_PROXIES` | empty | Comma-separated addresses or networks of reverse proxies whose `X-Forwarded-For` header is believed. |
+
+Over the limit the API answers `429 {"detail": "Too many requests. Try again later."}` with a `Retry-After` header. The response is identical whichever limit was hit and whether or not the account exists, and a correct password is refused too while limited. IPv6 clients are grouped by /64.
+
+**Limitations and deployment.**
+
+- Counters live in this process's memory: they reset on restart, and with several processes or replicas each counts separately, so the real limit is multiplied. Run one process, or add a shared store.
+- Clients are identified by their connection address. `X-Forwarded-For` is ignored unless the connection comes from a `TRUSTED_PROXIES` entry; then the nearest address in the header that is not itself a trusted proxy is used.
+- **Start uvicorn with `--no-proxy-headers`.** By default uvicorn rewrites the client address from `X-Forwarded-For` for connections from `127.0.0.1`, which lets a local client evade the limits (verified). Behind a reverse proxy, use `--no-proxy-headers` together with `TRUSTED_PROXIES`.
+- Behind a reverse proxy, list the proxy in `TRUSTED_PROXIES` (and keep `--no-proxy-headers`). Without it every user appears to come from the proxy's address and shares one set of limits. The proxy must set or append `X-Forwarded-For` itself, not pass a client's value through unchanged. Do not set uvicorn's `FORWARDED_ALLOW_IPS` or pass `--proxy-headers`: they make uvicorn trust the header independently of this setting.
+- Many clients behind one address (a company NAT) share its limits.
 
 **Usernames** are 3 to 32 characters: ASCII letters, digits, `_`, `-` and `.`. They are unique **ignoring case**, enforced by PostgreSQL itself (`Alice` and `alice` cannot both exist, even if two registrations arrive at the same moment). The case you chose is kept, and logging in ignores case. **Passwords** are 10 to 128 characters and are used exactly as typed (not trimmed). They are stored only as an Argon2id hash (19 MiB, 2 passes, 1 lane, the minimum OWASP recommends) and are never returned or logged.
 

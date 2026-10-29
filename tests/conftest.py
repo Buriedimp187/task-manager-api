@@ -14,8 +14,8 @@ from argon2 import PasswordHasher
 from sqlalchemy import create_engine, inspect, text
 
 from alembic import command
-from app import security
-from app.config import get_auth_settings, get_settings
+from app import rate_limit, security
+from app.config import get_access_settings, get_auth_settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_DATABASE = os.environ.get("TEST_POSTGRES_DB")
@@ -35,6 +35,26 @@ def authentication_settings(monkeypatch):
     get_auth_settings.cache_clear()
     yield
     get_auth_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def access_settings(monkeypatch):
+    """Every test starts with empty rate-limit counters and limits too high to get in the way.
+
+    Tests of the limits themselves set their own values and call `reset_access_settings()`.
+    """
+    for name in ("LOGIN_IP_LIMIT", "LOGIN_USER_LIMIT", "REGISTER_IP_LIMIT"):
+        monkeypatch.setenv(name, "100000")
+    for name in ("REGISTRATION_ENABLED", "TRUSTED_PROXIES"):
+        monkeypatch.delenv(name, raising=False)
+    reset_access_settings()
+    yield
+    reset_access_settings()
+
+
+def reset_access_settings():
+    get_access_settings.cache_clear()
+    rate_limit.get_limiter.cache_clear()
 
 
 def make_config() -> Config:

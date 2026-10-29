@@ -1,3 +1,4 @@
+import ipaddress
 from functools import lru_cache
 
 from pydantic import Field, SecretStr, field_validator
@@ -62,6 +63,45 @@ class ServerSettings(BaseSettings):
     request_threads: int = Field(20, ge=1, le=200)  # worker threads running the synchronous endpoints
 
 
+class AccessSettings(BaseSettings):
+    """Who may register and how fast clients may try. Everything has a default, so reading it needs no configuration."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Registration can be switched off without affecting login.
+    registration_enabled: bool = True
+
+    # Attempts allowed per window. A login attempt counts against its client address and against the
+    # address plus the (case-insensitive) username it names.
+    login_ip_limit: int = Field(10, gt=0, le=100_000)
+    login_ip_window_seconds: int = Field(60, gt=0, le=86_400)
+    login_user_limit: int = Field(5, gt=0, le=100_000)
+    login_user_window_seconds: int = Field(60, gt=0, le=86_400)
+    register_ip_limit: int = Field(5, gt=0, le=100_000)
+    register_ip_window_seconds: int = Field(3_600, gt=0, le=86_400)
+
+    # Comma-separated addresses or networks of reverse proxies whose X-Forwarded-For header may be believed.
+    # Empty (the default) means the header is never trusted and the connection's own address is used.
+    trusted_proxies: str = ""
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def trusted_proxies_must_be_addresses(cls, value: str) -> str:
+        for entry in value.split(","):
+            entry = entry.strip()
+            if entry:
+                try:
+                    ipaddress.ip_network(entry, strict=False)
+                except ValueError:
+                    raise ValueError(f"TRUSTED_PROXIES entry {entry!r} is not an IP address or network") from None
+        return value
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        entries = (entry.strip() for entry in self.trusted_proxies.split(","))
+        return tuple(ipaddress.ip_network(entry, strict=False) for entry in entries if entry)
+
+
 class AuthSettings(BaseSettings):
     """The token-signing secret. Kept apart from the database settings so that tools which only need
     the database, such as Alembic, do not require it."""
@@ -90,6 +130,11 @@ def get_settings() -> Settings:
 @lru_cache
 def get_server_settings() -> ServerSettings:
     return ServerSettings()
+
+
+@lru_cache
+def get_access_settings() -> AccessSettings:
+    return AccessSettings()
 
 
 @lru_cache

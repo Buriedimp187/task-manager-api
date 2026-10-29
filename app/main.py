@@ -12,7 +12,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from app.body_limit import BodySizeLimitMiddleware
-from app.config import get_auth_settings, get_server_settings
+from app.config import get_access_settings, get_auth_settings, get_server_settings
 from app.database import DatabaseBusy, dispose_engine, get_db
 from app.routers import auth, tasks
 
@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     # Refuse to start, with a clear message, if SECRET_KEY is missing or too short. Importing the
     # module (as the tests do) still needs no configuration: this only runs when the server starts.
     get_auth_settings()
+    get_access_settings()  # likewise for the rate-limit, registration and proxy settings
     # Synchronous endpoints run in a thread pool; its size, with the connection pool, bounds the work in flight.
     anyio.to_thread.current_default_thread_limiter().total_tokens = get_server_settings().request_threads
     try:
