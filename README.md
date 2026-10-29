@@ -205,13 +205,17 @@ All request and response bodies are JSON. **Every request needs a token** (see A
 
 | Request | Purpose | Success | Other responses |
 |---|---|---|---|
-| `POST /tasks` | Create a task | `201` with the task | `401`, `422` |
-| `GET /tasks` | List your tasks, ordered by `id` ascending | `200` with an array (empty if there are none) | `401` |
+| `POST /tasks` | Create a task | `201` with the task | `401`, `409` (task limit reached), `422` |
+| `GET /tasks?limit=&offset=` | List one page of your tasks, ordered by `id` ascending | `200` with an array (empty if there are none) and an `X-Total-Count` header | `401`, `422` |
 | `GET /tasks/{id}` | Fetch one of your tasks | `200` with the task | `401`, `404`, `422` |
 | `PATCH /tasks/{id}` | Change some fields of one of your tasks | `200` with the updated task | `401`, `404`, `422` |
 | `DELETE /tasks/{id}` | Delete one of your tasks | `204` with no body | `401`, `404`, `422` |
 
 Any request can also return `503` or `500`, described under "Errors" below.
+
+**Pagination.** `GET /tasks` returns at most `limit` tasks (default **50**, 1 to **200**), skipping `offset` (default 0, not negative) of your tasks in ascending `id` order. The body is still a plain array. The `X-Total-Count` header holds how many tasks you have in total, whatever the page, so a client can compute the number of pages. Because the order is by the unique `id`, walking pages with a growing `offset` returns each task once as long as nothing is added or deleted in between; the total and the page are read in one request but not as one snapshot. **This is a contract change**: earlier versions returned every task, so a client that never sent `limit` now receives at most 50.
+
+**Task limit.** An account can hold at most **1,000** tasks (`MAX_TASKS_PER_USER`, 1 to 1,000,000). Creating one more is refused with `409 {"detail": "Task limit of 1000 reached"}`; deleting a task frees a slot. Reading, updating and deleting are never refused. The limit is enforced by locking the account's own row while a task is created, so simultaneous requests from one account take turns and cannot exceed it, while other accounts are not delayed.
 
 **Fields**
 
@@ -255,13 +259,15 @@ PATCH /tasks/1
 |---|---|---|
 | `401` | `{"detail": "Not authenticated"}` | No valid token. Checked before the body or the id, so an unauthenticated request never learns whether a task exists. |
 | `404` | `{"detail": "Task not found"}` | None of **your** tasks has that id: it does not exist, or it belongs to someone else. This includes `DELETE`. |
+| `409` | `{"detail": "Task limit of 1000 reached"}` | `POST /tasks` only: the account already holds the maximum number of tasks. |
 | `422` | FastAPI's standard validation details, which echo the rejected value in `input` (except under `/auth`, see above) | Invalid body or id. Nothing was changed. Text that cannot be encoded as UTF-8, such as a lone surrogate (`"\ud800"` in JSON), is shown as `<unencodable text>` instead of being echoed. |
 | `503` | `{"detail": "Database unavailable"}` | The database could not be reached. This includes a wrong password, user or database name in the settings, which PostgreSQL's driver reports before the server can answer, so they cannot be told apart from an outage. |
+| `503` | `{"detail": "Database busy, retry shortly"}` with `Retry-After: 1` | The database is up but a lock or statement timed out, or no connection was free in time. Retry. A task creation that waits more than the lock timeout (3 s by default) for another creation by the same account ends this way. |
 | `500` | `Internal Server Error` | Unexpected errors and missing or invalid configuration. The response never contains details or credentials. |
 
 Database errors are never returned to the client. For a `503` the server log records only the exception class names.
 
-**Limitations.** `GET /tasks` returns every task; there is no pagination, filtering or search. Tasks have no `updated_at`.
+**Limitations.** There is no filtering or search, and `GET /tasks` is paginated only by `limit` and `offset`. Tasks have no `updated_at`.
 
 ## Health checks
 

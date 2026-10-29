@@ -64,7 +64,8 @@ class ServerSettings(BaseSettings):
 
 
 class AccessSettings(BaseSettings):
-    """Who may register and how fast clients may try. Everything has a default, so reading it needs no configuration."""
+    """Who may register, how fast clients may try and how much each user may store. Everything has a default,
+    so reading it needs no configuration."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -79,6 +80,9 @@ class AccessSettings(BaseSettings):
     login_user_window_seconds: int = Field(60, gt=0, le=86_400)
     register_ip_limit: int = Field(5, gt=0, le=100_000)
     register_ip_window_seconds: int = Field(3_600, gt=0, le=86_400)
+
+    # Most tasks one account may hold; creating more is refused with 409.
+    max_tasks_per_user: int = Field(1_000, gt=0, le=1_000_000)
 
     # Comma-separated addresses or networks of reverse proxies whose X-Forwarded-For header may be believed.
     # Empty (the default) means the header is never trusted and the connection's own address is used.

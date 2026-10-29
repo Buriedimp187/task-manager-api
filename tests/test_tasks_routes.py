@@ -123,8 +123,8 @@ def test_openapi_error_response_shape(spec):
 
 
 def test_openapi_documents_422_only_where_there_is_input_to_validate(spec):
-    assert "422" not in operation(spec, "get", "/tasks")["responses"]  # no parameters, no body
     for method, path in [
+        ("get", "/tasks"),  # limit and offset
         ("post", "/tasks"),
         ("get", "/tasks/{task_id}"),
         ("patch", "/tasks/{task_id}"),
@@ -133,9 +133,20 @@ def test_openapi_documents_422_only_where_there_is_input_to_validate(spec):
         assert "422" in operation(spec, method, path)["responses"]
 
 
-def test_openapi_list_endpoint_has_no_query_parameters(spec):
-    # Pagination and filtering are deliberately out of scope for now.
-    assert operation(spec, "get", "/tasks").get("parameters", []) == []
+def test_openapi_list_endpoint_documents_pagination(spec):
+    listing = operation(spec, "get", "/tasks")
+    parameters = {p["name"]: p for p in listing["parameters"]}
+
+    assert set(parameters) == {"limit", "offset"}
+    assert parameters["limit"]["schema"]["default"] == 50
+    assert (parameters["limit"]["schema"]["minimum"], parameters["limit"]["schema"]["maximum"]) == (1, 200)
+    assert (parameters["offset"]["schema"]["default"], parameters["offset"]["schema"]["minimum"]) == (0, 0)
+    assert "X-Total-Count" in listing["responses"]["200"]["headers"]
+
+
+def test_openapi_documents_the_task_limit_on_creation_only(spec):
+    assert "409" in operation(spec, "post", "/tasks")["responses"]
+    assert "409" not in operation(spec, "get", "/tasks")["responses"]
 
 
 def test_openapi_documents_the_id_bounds(spec):
@@ -175,7 +186,8 @@ def test_create_returns_201_with_the_stored_task(client, db):
     assert body["status"] == "todo"
     assert datetime.fromisoformat(body["created_at"]).tzinfo is not None
     assert set(body) == {"id", "title", "description", "status", "created_at"}
-    assert writes(db) == ["add:Task", "commit"]
+    # The user's row is locked and the user's tasks counted (the task limit) before the insert.
+    assert writes(db) == ["scalar:User:for_update=True", "count:Task", "add:Task", "commit"]
 
 
 def test_create_stores_the_supplied_fields(client):
@@ -345,10 +357,10 @@ def test_list_returns_tasks_in_ascending_id_order(client, db):
     assert "DESC" not in db.statement  # ascending, and deterministic: id is unique
 
 
-def test_list_takes_no_query_parameters_and_does_not_write(client, db):
-    client.get("/tasks?limit=1&offset=5")  # unknown parameters are ignored, not interpreted
+def test_list_only_reads(client, db):
+    client.get("/tasks?limit=1&offset=5")
 
-    assert writes(db) == ["scalars:Task"]
+    assert writes(db) == ["count:Task", "scalars:Task"]
 
 
 # --- GET /tasks/{id} -----------------------------------------------------------------------------

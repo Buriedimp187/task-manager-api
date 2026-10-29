@@ -60,14 +60,24 @@ class FakeSession:
 
     def _select(self, statement):
         entity = statement.column_descriptions[0]["entity"]
+        if entity is None:  # select(func.count()).select_from(Model)
+            entity = {"tasks": Task, "users": User}[statement.get_final_froms()[0].name]
         self.statement = str(statement.compile(dialect=postgresql.dialect()))
         rows = sorted(self.rows[entity].values(), key=lambda row: row.id)
         clause = statement.whereclause
-        return entity, [row for row in rows if clause is None or _matches(row, clause)]
+        rows = [row for row in rows if clause is None or _matches(row, clause)]
+        if statement._offset is not None:
+            rows = rows[statement._offset :]
+        if statement._limit is not None:
+            rows = rows[: statement._limit]
+        return entity, rows
 
     def scalar(self, statement):
         entity, rows = self._select(statement)
-        self.calls.append(f"scalar:{entity.__name__}:for_update={'FOR UPDATE' in self.statement}")
+        if "count(" in self.statement:
+            self.calls.append(f"count:{entity.__name__}")
+            return len(rows)
+        self.calls.append(f"scalar:{entity.__name__}:for_update={' FOR ' in self.statement}")
         return rows[0] if rows else None
 
     def scalars(self, statement):
@@ -89,6 +99,11 @@ class FakeSession:
     def delete(self, row):
         self.calls.append("delete")
         self.removed.append(row)
+
+    def rollback(self):
+        self.calls.append("rollback")
+        self.pending.clear()
+        self.removed.clear()
 
     def commit(self):
         self.calls.append("commit")
