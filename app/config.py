@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -18,6 +18,29 @@ class Settings(BaseSettings):
     postgres_host: str = "127.0.0.1"
     postgres_port: int = 5432
 
+    # Protection against a slow or stuck database. All bounds are strict so that 0 (which PostgreSQL treats as
+    # "no timeout") and negative values are rejected instead of silently disabling a safeguard.
+    db_statement_timeout_ms: int = Field(5_000, gt=0, le=300_000)  # one statement may not run longer
+    db_lock_timeout_ms: int = Field(3_000, gt=0, le=300_000)  # waiting for a row lock may not take longer
+    db_idle_in_transaction_timeout_ms: int = Field(15_000, gt=0, le=3_600_000)  # an open, idle transaction is closed
+    db_connect_timeout_seconds: int = Field(5, gt=0, le=60)
+    # Connections: at most pool_size + max_overflow are open at once, which is also the number of requests that
+    # can use the database simultaneously. ServerSettings.request_threads should not exceed that sum, so requests
+    # do not queue for a connection while holding a worker thread.
+    db_pool_size: int = Field(10, ge=1, le=100)
+    db_max_overflow: int = Field(10, ge=0, le=100)
+    db_pool_timeout_seconds: int = Field(5, gt=0, le=60)  # how long a request waits for a free connection
+    db_pool_recycle_seconds: int = Field(1_800, gt=0, le=86_400)  # replace connections older than this
+
+    @property
+    def connection_options(self) -> str:
+        """Server settings applied to every connection, as the libpq "options" string."""
+        return (
+            f"-c statement_timeout={self.db_statement_timeout_ms} "
+            f"-c lock_timeout={self.db_lock_timeout_ms} "
+            f"-c idle_in_transaction_session_timeout={self.db_idle_in_transaction_timeout_ms}"
+        )
+
     @property
     def database_url(self) -> URL:
         # URL.create escapes special characters, so passwords never need manual encoding.
@@ -29,6 +52,14 @@ class Settings(BaseSettings):
             port=self.postgres_port,
             database=self.postgres_db,
         )
+
+
+class ServerSettings(BaseSettings):
+    """Settings of the web process itself. Everything has a default, so reading them needs no configuration."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    request_threads: int = Field(20, ge=1, le=200)  # worker threads running the synchronous endpoints
 
 
 class AuthSettings(BaseSettings):
@@ -54,6 +85,11 @@ class AuthSettings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_server_settings() -> ServerSettings:
+    return ServerSettings()
 
 
 @lru_cache

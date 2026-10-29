@@ -327,8 +327,8 @@ def test_a_failed_commit_on_delete_keeps_the_row_and_releases_the_lock(api, monk
     assert api.client.delete("/tasks/1").status_code == 204
 
 
-def test_a_lock_timeout_is_a_generic_500_not_a_503(api):
-    # PostgreSQL reports it as an OperationalError (SQLSTATE 55P03), but the database is not down.
+def test_a_lock_timeout_is_a_retryable_503(api):
+    # PostgreSQL reports it as an OperationalError (SQLSTATE 55P03): the database is up but busy.
     insert_directly(api, 1, title="held")
 
     def session_with_a_short_lock_timeout():
@@ -347,8 +347,8 @@ def test_a_lock_timeout_is_a_generic_500_not_a_503(api):
         holder.rollback()
         holder.close()
 
-    assert response.status_code == 500
-    assert response.text == "Internal Server Error"
+    assert (response.status_code, response.json()) == (503, {"detail": "Database busy, retry shortly"})
+    assert response.headers["Retry-After"] == "1"
     assert [row.title for row in stored_tasks(api)] == ["held"]
 
 

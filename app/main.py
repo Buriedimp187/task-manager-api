@@ -1,17 +1,19 @@
 import logging
 from contextlib import asynccontextmanager
 
+import anyio.to_thread
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, InternalError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from app.body_limit import BodySizeLimitMiddleware
-from app.config import get_auth_settings
-from app.database import get_db
+from app.config import get_auth_settings, get_server_settings
+from app.database import DatabaseBusy, dispose_engine, get_db
 from app.routers import auth, tasks
 
 logger = logging.getLogger(__name__)
@@ -22,7 +24,12 @@ async def lifespan(app: FastAPI):
     # Refuse to start, with a clear message, if SECRET_KEY is missing or too short. Importing the
     # module (as the tests do) still needs no configuration: this only runs when the server starts.
     get_auth_settings()
-    yield
+    # Synchronous endpoints run in a thread pool; its size, with the connection pool, bounds the work in flight.
+    anyio.to_thread.current_default_thread_limiter().total_tokens = get_server_settings().request_threads
+    try:
+        yield
+    finally:
+        dispose_engine()  # close the pooled connections instead of leaving them for the server to cut
 
 
 app = FastAPI(title="Task Manager API", lifespan=lifespan)
@@ -32,9 +39,13 @@ app.include_router(tasks.router)
 
 # SQLSTATE codes meaning the database could not be reached or is shutting down or full. Errors raised
 # by the client library before the server answers (refused, timed out, connection lost) carry no
-# SQLSTATE at all and count as connectivity failures too. Anything else, such as a deadlock or a lock
-# timeout, is not an outage and stays a generic 500.
+# SQLSTATE at all and count as connectivity failures too.
 CONNECTIVITY_SQLSTATES = ("08", "53300", "57P01", "57P02", "57P03")
+# The database is up but too busy right now: a row lock or a statement exceeded its timeout (the
+# application's own safeguards), or the idle-in-transaction timeout closed the session. A retry may succeed.
+OVERLOAD_SQLSTATES = ("55P03", "57014", "25P03")
+# Anything else, such as a deadlock, a constraint or a bug in a query, is not an outage and stays a generic 500.
+RETRY_AFTER_SECONDS = "1"
 
 
 def is_connectivity_failure(error: OperationalError) -> bool:
@@ -44,19 +55,55 @@ def is_connectivity_failure(error: OperationalError) -> bool:
     return sqlstate is None or sqlstate.startswith(CONNECTIVITY_SQLSTATES)
 
 
+def is_overload(error: DBAPIError) -> bool:
+    sqlstate = getattr(error.orig, "sqlstate", None)
+    return sqlstate in OVERLOAD_SQLSTATES
+
+
+def log_database_problem(message: str, error: Exception) -> None:
+    # Log only exception class names: driver messages can include hosts, ports and user names.
+    orig = getattr(error, "orig", None)
+    logger.warning("%s: %s (driver error: %s)", message, type(error).__name__, type(orig).__name__ if orig else "none")
+
+
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, error: OperationalError):
-    if not is_connectivity_failure(error):
+    if is_connectivity_failure(error):
+        log_database_problem("Database unavailable", error)
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "Database unavailable"})
+    return busy_or_raise(error)
+
+
+@app.exception_handler(InternalError)
+async def database_internal_error(request: Request, error: InternalError):
+    return busy_or_raise(error)
+
+
+def busy_or_raise(error: DBAPIError):
+    if not is_overload(error):
         raise error  # not an outage: let it become the generic 500, with its traceback logged
-    # Log only exception class names: driver messages can include hosts, ports and user names.
-    logger.warning(
-        "Database unavailable: %s (driver error: %s)",
-        type(error).__name__,
-        type(error.orig).__name__ if error.orig is not None else "none",
-    )
+    log_database_problem("Database busy", error)
+    return retryable_503()
+
+
+@app.exception_handler(DatabaseBusy)
+async def database_busy(request: Request, error: DatabaseBusy):
+    logger.warning("Database busy: no free slot for the request")
+    return retryable_503()
+
+
+@app.exception_handler(PoolTimeoutError)
+async def connection_pool_exhausted(request: Request, error: PoolTimeoutError):
+    # Raised when no pooled connection became free within the pool timeout.
+    logger.warning("Database busy: %s (no free connection)", type(error).__name__)
+    return retryable_503()
+
+
+def retryable_503() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"detail": "Database unavailable"},
+        content={"detail": "Database busy, retry shortly"},
+        headers={"Retry-After": RETRY_AFTER_SECONDS},
     )
 
 

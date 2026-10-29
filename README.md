@@ -109,6 +109,23 @@ Tasks created before accounts existed have no owner, and an owner cannot be inve
 
 The tests refuse to run if the name does not end in `_test`, if it is the configured development database (including one named only in `.env`), if the database already contains tables other than `tasks`, `users` and `alembic_version`, or if it already holds any task or any account. Only after those checks pass do the tests clear any leftover rows and drop the tables when they finish, so use a database that exists only for testing.
 
+### Database limits
+
+The API protects itself and the database from slow or stuck work. Every setting is optional and can be set in `.env` (see `.env.example`):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DB_STATEMENT_TIMEOUT_MS` | 5000 | A single statement running longer is cancelled. |
+| `DB_LOCK_TIMEOUT_MS` | 3000 | Waiting longer than this for a row lock fails. |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 15000 | A transaction left idle this long is closed by the server. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | 10 / 10 | Connections kept open / extra connections allowed under load. |
+| `DB_POOL_TIMEOUT_SECONDS` | 5 | How long a request waits for a free connection slot before getting a 503. |
+| `DB_POOL_RECYCLE_SECONDS` | 1800 | Connections older than this are replaced. |
+| `DB_CONNECT_TIMEOUT_SECONDS` | 5 | How long opening a new connection may take. |
+| `REQUEST_THREADS` | 20 | Worker threads for requests; keep it at or below pool size + overflow. |
+
+Zero, negative and out-of-range values are rejected with a clear validation error (`REQUEST_THREADS` when the server starts, the `DB_*` values when the database is first used). When the database is unreachable the API answers `503 {"detail": "Database unavailable"}`. When it is up but busy (a lock or statement timeout, a closed idle transaction, or no free connection in time) it answers `503 {"detail": "Database busy, retry shortly"}` with `Retry-After: 1`; the request can safely be retried. At most pool size + overflow requests use the database at the same time; further requests wait for a slot (up to `DB_POOL_TIMEOUT_SECONDS`) without occupying a worker thread. Migrations are not subject to these limits. On shutdown the connection pool is closed cleanly.
+
 ### API
 
 With `.env` filled in (database settings and `SECRET_KEY`) and the database running:

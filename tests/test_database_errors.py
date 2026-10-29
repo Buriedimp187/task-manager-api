@@ -13,6 +13,7 @@ from sqlalchemy.exc import (
     DataError,
     IntegrityError,
     InterfaceError,
+    InternalError,
     InvalidRequestError,
     OperationalError,
     ProgrammingError,
@@ -23,13 +24,14 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from app.config import get_settings
 from app.database import get_db
-from app.main import app, is_connectivity_failure
+from app.main import app, is_connectivity_failure, is_overload
 from app.models import User
 
 SECRET_HOST = "db.internal.example"
 SECRET_USER = "svc_account"
 SECRET_PASSWORD = "p@ss:w/ord#?%&=+ test-only"
 UNAVAILABLE = {"detail": "Database unavailable"}
+BUSY = {"detail": "Database busy, retry shortly"}
 
 
 class FakeDriverError(Exception):
@@ -145,9 +147,9 @@ def test_an_invalidated_connection_is_503(failing):
     assert failing(error).get("/tasks").status_code == 503
 
 
-@pytest.mark.parametrize("sqlstate", ["40P01", "55P03", "57014", "28P01", "42P01"])
+@pytest.mark.parametrize("sqlstate", ["40P01", "28P01", "42P01"])
 def test_operational_errors_that_are_not_outages_stay_a_generic_500(failing, sqlstate):
-    # deadlock, lock timeout, cancelled query, rejected credentials from the server, missing table
+    # deadlock, rejected credentials from the server, missing table
     response = failing(operational_error(sqlstate)).get("/tasks")
 
     assert response.status_code == 500
@@ -162,7 +164,6 @@ def test_operational_errors_that_are_not_outages_stay_a_generic_500(failing, sql
         IntegrityError("INSERT", {}, FakeDriverError("23514")),
         InterfaceError("SELECT", {}, FakeDriverError()),
         InvalidRequestError("session is in a bad state"),
-        SATimeoutError("QueuePool limit of size 5 overflow 10 reached"),
         StaleDataError("UPDATE matched 0 rows"),
         RuntimeError("bug"),
     ],
@@ -199,8 +200,6 @@ def test_real_psycopg_connectivity_errors_are_503(failing, driver_error):
     [
         psycopg.errors.DeadlockDetected,
         psycopg.errors.SerializationFailure,
-        psycopg.errors.LockNotAvailable,
-        psycopg.errors.QueryCanceled,
         psycopg.errors.IdleSessionTimeout,
         psycopg.errors.InvalidPassword,
         psycopg.errors.InvalidAuthorizationSpecification,
@@ -288,3 +287,72 @@ def test_missing_configuration_stays_a_generic_500_not_a_503(monkeypatch, tmp_pa
 
     assert response.status_code == 500
     assert response.text == "Internal Server Error"
+
+
+# --- a busy database: a timeout or an exhausted pool is a retryable 503 ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        operational_error("55P03"),  # lock_timeout
+        operational_error("57014"),  # statement_timeout
+        InternalError("SELECT 1", {}, FakeDriverError("25P03")),  # idle_in_transaction_session_timeout
+        OperationalError("SELECT 1", {}, psycopg.errors.LockNotAvailable("boom")),
+        OperationalError("SELECT 1", {}, psycopg.errors.QueryCanceled("boom")),
+        InternalError("SELECT 1", {}, psycopg.errors.IdleInTransactionSessionTimeout("boom")),
+        SATimeoutError("QueuePool limit of size 10 overflow 10 reached, connection timed out"),
+    ],
+)
+def test_a_busy_database_is_a_retryable_503(failing, error):
+    response = failing(error).get("/tasks")
+
+    assert (response.status_code, response.json()) == (503, BUSY)
+    assert response.headers["Retry-After"] == "1"
+
+
+def test_a_busy_database_response_exposes_no_internals(failing):
+    for error in (operational_error("55P03"), SATimeoutError(f"pool exhausted for {SECRET_USER}@{SECRET_HOST}")):
+        response = failing(error).get("/tasks")
+
+        for secret in (SECRET_HOST, SECRET_USER, SECRET_PASSWORD, "SELECT", "QueuePool"):
+            assert secret not in response.text
+
+
+def test_an_outage_has_no_retry_after_and_keeps_its_own_message(failing):
+    response = failing(operational_error(None)).get("/tasks")
+
+    assert (response.status_code, response.json()) == (503, UNAVAILABLE)
+    assert "Retry-After" not in response.headers
+
+
+def test_a_busy_database_is_logged_with_class_names_only(failing, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        failing(operational_error("55P03")).get("/tasks")
+        failing(SATimeoutError(f"{SECRET_USER}@{SECRET_HOST}")).get("/tasks")
+
+    text = " ".join(r.getMessage() for r in caplog.records if r.name == "app.main")
+    assert text.count("Database busy") == 2
+    assert SECRET_USER not in text and SECRET_HOST not in text and SECRET_PASSWORD not in text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InternalError("SELECT 1", {}, FakeDriverError("XX000")),  # some other internal error
+        InternalError("SELECT 1", {}, FakeDriverError(None)),
+        InternalError("SELECT 1", {}, psycopg.errors.InternalError_("boom")),
+    ],
+)
+def test_other_internal_errors_stay_a_generic_500(failing, error):
+    response = failing(error).get("/tasks")
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+
+
+def test_the_overload_classifier_is_exact():
+    assert is_overload(operational_error("55P03")) and is_overload(operational_error("57014"))
+    assert not is_overload(operational_error("40P01"))  # deadlock
+    assert not is_overload(operational_error("57P03"))  # an outage, not overload
+    assert not is_overload(operational_error(None))
