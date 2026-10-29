@@ -26,6 +26,40 @@ def test_create_rejects_missing_title():
         TaskCreate()
 
 
+@pytest.mark.parametrize("title", ["\x00", "bad\x00title", "\x00 leading", "trailing \x00"])
+def test_create_rejects_nul_characters_in_the_title(title):
+    with pytest.raises(ValidationError, match="NUL"):
+        TaskCreate(title=title)
+
+
+@pytest.mark.parametrize("description", ["\x00", "bad\x00text", "text\x00"])
+def test_create_rejects_nul_characters_in_the_description(description):
+    with pytest.raises(ValidationError, match="NUL"):
+        TaskCreate(title="Write tests", description=description)
+
+
+def test_update_rejects_nul_characters():
+    with pytest.raises(ValidationError, match="NUL"):
+        TaskUpdate(title="bad\x00title")
+    with pytest.raises(ValidationError, match="NUL"):
+        TaskUpdate(description="bad\x00text")
+
+
+def test_nul_rejection_does_not_affect_other_control_characters_or_unicode():
+    task = TaskCreate(title="tab\there é中\U0001f600", description="line1\nline2")
+
+    assert task.title == "tab\there é中\U0001f600"
+    assert task.description == "line1\nline2"
+
+
+def test_error_response_shape():
+    from app.schemas import ErrorResponse
+
+    assert ErrorResponse(detail="Task not found").model_dump() == {"detail": "Task not found"}
+    with pytest.raises(ValidationError):
+        ErrorResponse()
+
+
 def test_create_rejects_unknown_status():
     with pytest.raises(ValidationError):
         TaskCreate(title="Write tests", status="archived")

@@ -11,10 +11,23 @@ from pydantic import (
     model_validator,
 )
 
-Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+def reject_nul(value: str) -> str:
+    # PostgreSQL text cannot contain NUL, so such a value would otherwise fail later, at insert time.
+    if "\x00" in value:
+        raise ValueError("must not contain NUL characters")
+    return value
+
+
+Title = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+    AfterValidator(reject_nul),
+]
 # Text is trimmed first, so a whitespace-only description becomes "" and is then stored as None.
 Description = Annotated[
-    Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None,
+    Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000), AfterValidator(reject_nul)]
+    | None,
     AfterValidator(lambda value: value or None),
 ]
 
@@ -53,8 +66,8 @@ class TaskUpdate(BaseModel):
         return self
 
 
-class NotImplementedResponse(BaseModel):
-    """Body of the temporary 501 response returned by the task routes."""
+class ErrorResponse(BaseModel):
+    """Body of an error response such as 404 or 503."""
 
     detail: str
 

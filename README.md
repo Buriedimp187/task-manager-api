@@ -2,7 +2,7 @@
 
 A REST API for managing tasks, built with Python, FastAPI, PostgreSQL, SQLAlchemy and Pytest.
 
-Status: early development. The health endpoints work, and the database connection layer, the `Task` model and the first Alembic migration are in place. The `/tasks` routes and their request/response schemas are defined and validated, but they do not read or write the database yet and still return `501 Not Implemented`.
+Status: early development. The task endpoints (create, list, get, update, delete) store their data in PostgreSQL, the schema is managed by Alembic migrations, and there are health endpoints. There is no authentication yet, so anyone who can reach the API can read and change every task.
 
 ## Run locally
 
@@ -72,9 +72,9 @@ Take a backup first (for example with `pg_dump`) if there is any chance you will
 | Development database (`POSTGRES_DB` in `.env`) | Your tasks | **No.** Never use it as `TEST_POSTGRES_DB`. |
 | Test database (name ends in `_test`, created only for the tests) | Throwaway test rows | Yes. The tests clear it and drop `tasks`. |
 
-#### Migration integration tests
+#### PostgreSQL integration tests
 
-`pytest` runs the migration configuration tests without a database. The PostgreSQL integration tests are skipped unless you name a **separate, disposable** test database; they run migrations up and down on it, so never point them at a database that holds data you care about.
+`pytest` runs most tests without a database. The PostgreSQL integration tests (the migrations in `tests/test_migrations.py` and the task endpoints in `tests/test_tasks_postgres.py`) are skipped unless you name a **separate, disposable** test database. They run migrations up and down on it and store and delete tasks in it, so never point them at a database that holds data you care about.
 
 1. Create an empty database whose name ends in `_test`:
 
@@ -85,7 +85,7 @@ Take a backup first (for example with `pg_dump`) if there is any chance you will
 2. Run the tests with `TEST_POSTGRES_DB` set (PowerShell: `$env:TEST_POSTGRES_DB = "taskmanager_test"`; bash: `export TEST_POSTGRES_DB=taskmanager_test`):
 
    ```bash
-   pytest tests/test_migrations.py
+   pytest
    ```
 
 The tests refuse to run if the name does not end in `_test`, if it is the configured development database (including one named only in `.env`), if the database already contains tables other than `tasks` and `alembic_version`, or if its `tasks` table already holds rows. Only after those checks pass do the tests clear any leftover rows and drop the `tasks` table when they finish, so use a database that exists only for testing.
@@ -97,6 +97,67 @@ uvicorn app.main:app --reload
 ```
 
 Open http://127.0.0.1:8000/docs for the interactive documentation.
+
+## Tasks API
+
+All request and response bodies are JSON.
+
+| Request | Purpose | Success | Other responses |
+|---|---|---|---|
+| `POST /tasks` | Create a task | `201` with the task | `422` |
+| `GET /tasks` | List every task, ordered by `id` ascending | `200` with an array (empty if there are none) | |
+| `GET /tasks/{id}` | Fetch one task | `200` with the task | `404`, `422` |
+| `PATCH /tasks/{id}` | Change some fields of a task | `200` with the updated task | `404`, `422` |
+| `DELETE /tasks/{id}` | Delete a task | `204` with no body | `404`, `422` |
+
+Any request can also return `503` or `500`, described under "Errors" below.
+
+**Fields**
+
+| Field | Rules |
+|---|---|
+| `id` | Read-only integer from 1 to 2,147,483,647, assigned by the database. |
+| `title` | Required. Surrounding whitespace is trimmed; 1 to 200 characters. |
+| `description` | Optional. Trimmed, up to 2,000 characters; a blank value is stored as `null`. |
+| `status` | `todo` (the default), `in_progress` or `done`. |
+| `created_at` | Read-only, timezone-aware, set by the database. |
+
+Unknown fields are rejected, so `id` and `created_at` cannot be set by a client. The NUL character (`\u0000`) is rejected in `title` and `description`, because PostgreSQL cannot store it.
+
+```http
+POST /tasks
+{"title": "  Write the README  ", "description": "Cover every endpoint"}
+
+201 Created
+{"id": 1, "title": "Write the README", "description": "Cover every endpoint",
+ "status": "todo", "created_at": "2026-10-28T23:59:59.123456Z"}
+```
+
+**Updating.** `PATCH` changes only the fields you send. A field you leave out is not touched, `"description": null` clears the description, and `null` is not allowed for `title` or `status`. An empty body is rejected with `422`. Updating a task to the values it already has still returns `200`.
+
+```http
+PATCH /tasks/1
+{"status": "done"}
+
+200 OK
+{"id": 1, "title": "Write the README", "description": "Cover every endpoint",
+ "status": "done", "created_at": "2026-10-28T23:59:59.123456Z"}
+```
+
+**Concurrent changes.** `PATCH` and `DELETE` lock the task's row until they finish, so two changes to the same task are applied one after the other (the last one wins; there is no versioning). A `PATCH` that loses a race with a `DELETE` gets `404`.
+
+**Errors**
+
+| Status | Body | Meaning |
+|---|---|---|
+| `404` | `{"detail": "Task not found"}` | No task has that id. This includes `DELETE`. |
+| `422` | FastAPI's standard validation details, which echo the rejected value in `input` | Invalid body or id. Nothing was changed. Text that cannot be encoded as UTF-8, such as a lone surrogate (`"\ud800"` in JSON), is shown as `<unencodable text>` instead of being echoed. |
+| `503` | `{"detail": "Database unavailable"}` | The database could not be reached. This includes a wrong password, user or database name in the settings, which PostgreSQL's driver reports before the server can answer, so they cannot be told apart from an outage. |
+| `500` | `Internal Server Error` | Unexpected errors and missing or invalid configuration. The response never contains details or credentials. |
+
+Database errors are never returned to the client. For a `503` the server log records only the exception class names.
+
+**Limitations.** `GET /tasks` returns every task; there is no pagination, filtering or search. Tasks have no `updated_at`.
 
 ## Health checks
 
@@ -113,4 +174,4 @@ If `/health` returns `200` but `/health/db` returns `503`, the API is up and the
 pytest
 ```
 
-The default test run does not need a running database; the PostgreSQL migration tests are skipped unless `TEST_POSTGRES_DB` is set (see above).
+The default test run does not need a running database. The task endpoint tests in that run use an in-memory fake session, which checks the API contract but proves nothing about PostgreSQL; persistence, ordering, locking and constraints are covered by the PostgreSQL integration tests, which are skipped unless `TEST_POSTGRES_DB` is set (see above).

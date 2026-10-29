@@ -11,9 +11,8 @@ from types import SimpleNamespace
 import psycopg.errors
 import pytest
 from alembic import command
-from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -21,16 +20,10 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import Task
 from app.schemas import TaskRead, TaskStatus
+from conftest import COUNT_STATEMENT, PROJECT_ROOT, make_config, refuse_unless_disposable
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 POSTGRES_VARIABLES = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_HOST", "POSTGRES_PORT")
 PASSWORD = "p@ss:w/ord#?%&=+ test-only"
-
-
-def make_config() -> Config:
-    config = Config(str(PROJECT_ROOT / "alembic.ini"))
-    config.attributes["configure_logger"] = False  # leave Python's logging untouched
-    return config
 
 
 @pytest.fixture
@@ -104,7 +97,6 @@ def load_initial_migration():
 
 
 LOCK_STATEMENT = "LOCK TABLE tasks IN ACCESS EXCLUSIVE MODE"
-COUNT_STATEMENT = "SELECT count(*) FROM tasks"
 
 
 class RecordingOp:
@@ -165,48 +157,44 @@ def test_offline_mode_does_not_lock_or_count_so_generated_sql_is_unprotected():
 
 
 def test_destructive_alembic_calls_only_run_behind_the_safety_checks():
-    """Every online upgrade/downgrade in this file must sit behind the `test_database` fixture."""
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    """Every online upgrade/downgrade in the test suite must sit behind the `test_database` fixture."""
     # Targets an unreachable port on purpose, so it cannot touch any database.
     exempt = {"test_migration_failure_does_not_leak_the_password"}
     offenders = []
     fixture_calls = []
+    guard_lines = []
 
-    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-    # A nested helper runs under its enclosing test, so it is judged by that test's fixtures.
-    nested = {inner for outer in functions for inner in ast.walk(outer) if inner is not outer and inner in functions}
+    for path in sorted(Path(__file__).resolve().parent.glob("*.py")):  # test modules and conftest.py
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        # A nested helper runs under its enclosing test, so it is judged by that test's fixtures.
+        nested = {inner for outer in functions for inner in ast.walk(outer) if inner is not outer and inner in functions}
 
-    for function in [function for function in functions if function not in nested]:
-        for call in [node for node in ast.walk(function) if isinstance(node, ast.Call)]:
-            target = call.func
-            is_alembic = (
-                isinstance(target, ast.Attribute)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "command"
-                and target.attr in {"upgrade", "downgrade"}
-            )
-            offline = any(
-                keyword.arg == "sql" and getattr(keyword.value, "value", None) is True
-                for keyword in call.keywords
-            )
-            if not is_alembic or offline:
-                continue
-            if function.name == "test_database":
-                fixture_calls.append(call.lineno)
-            elif "test_database" not in [arg.arg for arg in function.args.args] and function.name not in exempt:
-                offenders.append(function.name)
+        for function in [function for function in functions if function not in nested]:
+            for call in [node for node in ast.walk(function) if isinstance(node, ast.Call)]:
+                target = call.func
+                if function.name == "test_database" and getattr(target, "id", None) == "refuse_unless_disposable":
+                    guard_lines.append(call.lineno)
+                is_alembic = (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "command"
+                    and target.attr in {"upgrade", "downgrade"}
+                )
+                offline = any(
+                    keyword.arg == "sql" and getattr(keyword.value, "value", None) is True
+                    for keyword in call.keywords
+                )
+                if not is_alembic or offline:
+                    continue
+                if function.name == "test_database":
+                    fixture_calls.append(call.lineno)
+                elif "test_database" not in [arg.arg for arg in function.args.args] and function.name not in exempt:
+                    offenders.append(f"{path.name}::{function.name}")
 
     assert offenders == []
 
-    # Inside the fixture, the refusal check must come before the first upgrade/downgrade.
-    fixture = next(
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "test_database"
-    )
-    guard_lines = [
-        node.lineno
-        for node in ast.walk(fixture)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "refuse_unless_disposable"
-    ]
+    # Inside the fixture (conftest.py), the refusal check must come before the first upgrade/downgrade.
     assert guard_lines and fixture_calls and max(guard_lines) < min(fixture_calls)
 
 
@@ -223,62 +211,8 @@ def test_migration_failure_does_not_leak_the_password(fake_settings, monkeypatch
     assert PASSWORD not in repr(error.value)
 
 
-# --- PostgreSQL integration: only against an explicitly named, disposable test database -------
-
-TEST_DATABASE = os.environ.get("TEST_POSTGRES_DB")
-ALLOWED_TABLES = {"alembic_version", "tasks"}
-
-requires_test_database = pytest.mark.skipif(
-    not TEST_DATABASE,
-    reason="set TEST_POSTGRES_DB to a disposable database whose name ends in _test",
-)
-
-
-def refuse_unless_disposable(test_database, configured_database, tables, task_count):
-    """Raise unless `test_database` is safe to wipe; runs before anything destructive."""
-    if not test_database.endswith("_test"):
-        raise AssertionError("TEST_POSTGRES_DB must end with _test")
-    if test_database == configured_database:
-        raise AssertionError("TEST_POSTGRES_DB must not be the configured development database")
-    if not set(tables) <= ALLOWED_TABLES:
-        raise AssertionError(f"refusing to run: {test_database} contains other tables: {sorted(tables)}")
-    if task_count:
-        raise AssertionError(f"refusing to run: {test_database} already holds {task_count} task(s)")
-
-
-@pytest.fixture
-def test_database(monkeypatch):
-    """Point the settings at the test database, after refusing anything that could hold real data."""
-    get_settings.cache_clear()
-    configured_database = get_settings().postgres_db  # read from the environment or .env
-    monkeypatch.setenv("POSTGRES_DB", TEST_DATABASE)
-    get_settings.cache_clear()
-
-    engine = create_engine(get_settings().database_url, connect_args={"connect_timeout": 5})
-    try:
-        tables = set(inspect(engine).get_table_names())
-        task_count = 0
-        if "tasks" in tables:
-            with engine.connect() as connection:
-                task_count = connection.execute(text(COUNT_STATEMENT)).scalar_one()
-        refuse_unless_disposable(TEST_DATABASE, configured_database, tables, task_count)
-
-        config = make_config()
-        command.downgrade(config, "base")  # start from an empty schema
-    except BaseException:
-        # Setup was refused or failed: release the connections and the cached settings first.
-        engine.dispose()
-        get_settings.cache_clear()
-        raise
-    yield engine, config
-    # The checks above proved this database is disposable, so clearing it is safe. The downgrade
-    # itself refuses to drop a table that still holds tasks.
-    with engine.begin() as connection:
-        if inspect(connection).has_table("tasks"):
-            connection.execute(text("DELETE FROM tasks"))
-    command.downgrade(config, "base")
-    engine.dispose()
-    get_settings.cache_clear()
+# --- PostgreSQL integration: the `test_database` fixture and its safety checks live in conftest.py;
+# --- it skips these tests unless TEST_POSTGRES_DB names a disposable database ending in _test.
 
 
 def test_safety_check_accepts_an_empty_or_migrated_test_database():
@@ -320,7 +254,14 @@ def test_safety_check_uses_the_settings_not_just_the_process_environment(monkeyp
         refuse_unless_disposable("named_in_dotenv_test", configured, set(), 0)
 
 
-@requires_test_database
+def test_fixture_reads_the_development_database_name_from_the_settings():
+    # Source-level check: reading only os.environ would miss a database named in .env.
+    fixture_source = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
+
+    assert "configured_database = get_settings().postgres_db" in fixture_source
+    assert 'os.environ.get("POSTGRES_DB")' not in fixture_source
+
+
 def test_upgrade_creates_the_expected_schema(test_database):
     engine, config = test_database
 
@@ -342,7 +283,6 @@ def test_upgrade_creates_the_expected_schema(test_database):
     assert inspector.get_pk_constraint("tasks")["name"] == "pk_tasks"
 
 
-@requires_test_database
 def test_models_and_migrations_agree(test_database):
     _, config = test_database
     command.upgrade(config, "head")
@@ -350,7 +290,6 @@ def test_models_and_migrations_agree(test_database):
     command.check(config)  # raises if autogenerate would produce any change
 
 
-@requires_test_database
 def test_database_applies_defaults_and_returns_a_valid_task_read(test_database):
     engine, config = test_database
     command.upgrade(config, "head")
@@ -368,7 +307,6 @@ def test_database_applies_defaults_and_returns_a_valid_task_read(test_database):
     assert isinstance(read.created_at, datetime) and read.created_at.tzinfo is not None
 
 
-@requires_test_database
 @pytest.mark.parametrize(
     "values, error",
     [
@@ -389,7 +327,6 @@ def test_database_rejects_invalid_rows(test_database, values, error):
             connection.execute(text(f"INSERT INTO tasks ({columns}) VALUES ({placeholders})"), values)
 
 
-@requires_test_database
 def test_downgrade_refuses_while_tasks_exist_and_keeps_the_data(test_database):
     engine, config = test_database
     command.upgrade(config, "head")
@@ -406,7 +343,6 @@ def test_downgrade_refuses_while_tasks_exist_and_keeps_the_data(test_database):
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0001"
 
 
-@requires_test_database
 def test_downgrade_holds_a_lock_that_blocks_concurrent_writers(test_database):
     engine, config = test_database
     command.upgrade(config, "head")
@@ -445,7 +381,6 @@ def test_downgrade_holds_a_lock_that_blocks_concurrent_writers(test_database):
     assert "tasks" not in inspect(engine).get_table_names()
 
 
-@requires_test_database
 def test_downgrade_removes_the_table_and_upgrade_restores_it(test_database):
     engine, config = test_database
     command.upgrade(config, "head")
