@@ -9,11 +9,11 @@ import secrets
 from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from argon2 import PasswordHasher
 from sqlalchemy import create_engine, inspect, text
 
+from alembic import command
 from app import security
 from app.config import get_auth_settings, get_settings
 

@@ -18,9 +18,7 @@ class WorkingSession:
 
 class BrokenSession:
     def execute(self, statement):
-        raise OperationalError(
-            "SELECT 1", {}, Exception('password authentication failed for user "app_user"')
-        )
+        raise OperationalError("SELECT 1", {}, Exception('password authentication failed for user "app_user"'))
 
 
 @pytest.fixture

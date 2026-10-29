@@ -138,7 +138,22 @@ def test_valid_usernames_are_accepted(client, username):
 
 @pytest.mark.parametrize(
     "username",
-    ["", "ab", "a" * 33, "bad name", "bad\n", "bad\nname", " leading", "trailing ", "émile", "名前名前", "a/b", "ali@ce", "al;ce", "a\x00b"],
+    [
+        "",
+        "ab",
+        "a" * 33,
+        "bad name",
+        "bad\n",
+        "bad\nname",
+        " leading",
+        "trailing ",
+        "émile",
+        "名前名前",
+        "a/b",
+        "ali@ce",
+        "al;ce",
+        "a\x00b",
+    ],
 )
 def test_invalid_usernames_are_rejected(client, db, username):
     response = register(client, username)
@@ -380,7 +395,9 @@ def test_a_token_signed_with_another_key_is_401(client, user):
 
 
 def test_an_unsigned_token_is_401(client, user):
-    unsigned = jwt.encode({"sub": "1", "iat": datetime.now(UTC), "exp": datetime.now(UTC) + timedelta(minutes=5)}, None, algorithm="none")
+    unsigned = jwt.encode(
+        {"sub": "1", "iat": datetime.now(UTC), "exp": datetime.now(UTC) + timedelta(minutes=5)}, None, algorithm="none"
+    )
 
     assert list_tasks_with(client, f"Bearer {unsigned}").status_code == 401
 
@@ -419,11 +436,17 @@ def test_a_token_with_a_bad_subject_is_401(client, user, subject):
 def test_a_token_issued_in_the_future_is_401(client, user):
     future = datetime.now(UTC) + timedelta(minutes=10)
 
-    assert list_tasks_with(client, f"Bearer {token({'iat': future, 'exp': future + timedelta(minutes=5)})}").status_code == 401
+    assert (
+        list_tasks_with(client, f"Bearer {token({'iat': future, 'exp': future + timedelta(minutes=5)})}").status_code
+        == 401
+    )
 
 
 def test_a_token_that_is_not_yet_valid_is_401(client, user):
-    assert list_tasks_with(client, f"Bearer {token({'nbf': datetime.now(UTC) + timedelta(minutes=10)})}").status_code == 401
+    assert (
+        list_tasks_with(client, f"Bearer {token({'nbf': datetime.now(UTC) + timedelta(minutes=10)})}").status_code
+        == 401
+    )
 
 
 def test_a_token_for_an_account_that_does_not_exist_is_401(client, user):
@@ -454,7 +477,11 @@ def test_validation_errors_on_auth_routes_never_echo_what_was_submitted(client, 
         client.post("/auth/register", json={"username": "alice", "password": secret_password[:5]}),
         client.post("/auth/login", json={"password": secret_password}),
         client.post("/auth/login", json={"username": "x", "password": secret_password, "extra": 1}),
-        client.post("/auth/register", content='{"username": "alice", "password": "' + secret_password, headers={"content-type": "application/json"}),
+        client.post(
+            "/auth/register",
+            content='{"username": "alice", "password": "' + secret_password,
+            headers={"content-type": "application/json"},
+        ),
     ]
 
     for response in attempts:

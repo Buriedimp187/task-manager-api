@@ -26,8 +26,7 @@ Title = Annotated[
 ]
 # Text is trimmed first, so a whitespace-only description becomes "" and is then stored as None.
 Description = Annotated[
-    Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000), AfterValidator(reject_nul)]
-    | None,
+    Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000), AfterValidator(reject_nul)] | None,
     AfterValidator(lambda value: value or None),
 ]
 
@@ -45,7 +44,8 @@ Password = Annotated[
 ]
 
 
-class TaskStatus(str, Enum):
+# A plain str Enum keeps str()/format() output unchanged; StrEnum would alter it.
+class TaskStatus(str, Enum):  # noqa: UP042
     todo = "todo"
     in_progress = "in_progress"
     done = "done"

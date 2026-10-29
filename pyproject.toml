@@ -1,3 +1,18 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares dependencies and path parameters as argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Path"]
+
+[tool.ruff.lint.per-file-ignores]
+# Alembic-generated revision files are frozen snapshots; keep the template's typing style.
+"alembic/versions/*.py" = ["UP007", "UP035"]

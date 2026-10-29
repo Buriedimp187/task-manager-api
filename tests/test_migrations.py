@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import psycopg.errors
 import pytest
-from alembic import command
 from alembic.script import ScriptDirectory
 from conftest import (
     COUNT_STATEMENT,
@@ -24,6 +23,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from alembic import command
 from app.config import get_settings
 from app.models import Task
 from app.schemas import TaskRead, TaskStatus, UserCreate
@@ -108,9 +108,7 @@ def test_offline_upgrade_emits_both_tables_without_a_database(fake_settings):
     assert "CONSTRAINT ck_users_username_format CHECK (username ~ '^[A-Za-z0-9_.-]{3,32}$')" in sql
     assert "CREATE UNIQUE INDEX uq_users_username_lower ON users (lower(username))" in sql
     assert "ALTER TABLE tasks ADD COLUMN owner_id INTEGER NOT NULL" in sql
-    assert (
-        "ADD CONSTRAINT fk_tasks_owner_id_users FOREIGN KEY(owner_id) REFERENCES users (id) ON DELETE CASCADE" in sql
-    )
+    assert "ADD CONSTRAINT fk_tasks_owner_id_users FOREIGN KEY(owner_id) REFERENCES users (id) ON DELETE CASCADE" in sql
     assert "CREATE INDEX ix_tasks_owner_id_id ON tasks (owner_id, id)" in sql
     assert PASSWORD not in sql and "app_user" not in sql
 
@@ -302,7 +300,9 @@ def test_destructive_alembic_calls_only_run_behind_the_safety_checks():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
         # A nested helper runs under its enclosing test, so it is judged by that test's fixtures.
-        nested = {inner for outer in functions for inner in ast.walk(outer) if inner is not outer and inner in functions}
+        nested = {
+            inner for outer in functions for inner in ast.walk(outer) if inner is not outer and inner in functions
+        }
 
         for function in [function for function in functions if function not in nested]:
             for call in [node for node in ast.walk(function) if isinstance(node, ast.Call)]:
@@ -316,8 +316,7 @@ def test_destructive_alembic_calls_only_run_behind_the_safety_checks():
                     and target.attr in {"upgrade", "downgrade"}
                 )
                 offline = any(
-                    keyword.arg == "sql" and getattr(keyword.value, "value", None) is True
-                    for keyword in call.keywords
+                    keyword.arg == "sql" and getattr(keyword.value, "value", None) is True for keyword in call.keywords
                 )
                 if not is_alembic or offline:
                     continue
@@ -705,6 +704,7 @@ def test_0002_downgrade_holds_a_lock_that_blocks_concurrent_registrations(test_d
     assert run_downgrade_paused(test_database, "0001", USER_COUNT_STATEMENT, try_to_register) is None
     assert isinstance(outcome["blocked"].orig, psycopg.errors.LockNotAvailable)
     assert revision(engine) == "0001" and "users" not in inspect(engine).get_table_names()
+
 
 def test_downgrade_removes_the_tables_and_upgrade_restores_them(test_database):
     engine, config = test_database

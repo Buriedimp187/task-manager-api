@@ -81,9 +81,7 @@ def test_create_normalizes_blank_description_to_none(description):
 
 
 def test_create_trims_description():
-    assert TaskCreate(title="Write tests", description="  Cover edge cases \n").description == (
-        "Cover edge cases"
-    )
+    assert TaskCreate(title="Write tests", description="  Cover edge cases \n").description == ("Cover edge cases")
 
 
 def test_create_keeps_explicit_null_description():

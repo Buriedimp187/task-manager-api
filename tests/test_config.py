@@ -1,11 +1,10 @@
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-import re
-
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import make_url
@@ -126,11 +125,7 @@ def test_engine_is_configured_without_connecting(db_env):
 
 
 def test_importing_the_app_needs_no_configuration_or_database(tmp_path):
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("POSTGRES_") and key != "SECRET_KEY"
-    }
+    env = {key: value for key, value in os.environ.items() if not key.startswith("POSTGRES_") and key != "SECRET_KEY"}
     env["PYTHONPATH"] = str(PROJECT_ROOT)
 
     result = subprocess.run(
@@ -201,7 +196,11 @@ def test_the_secret_key_can_come_from_a_dotenv_file(no_configuration, tmp_path):
 
 def test_the_placeholder_in_env_example_is_too_short_to_use(no_configuration):
     # Copying .env.example without editing it must not produce a working (and guessable) key.
-    line = next(l for l in (REPO / ".env.example").read_text(encoding="utf-8").splitlines() if l.startswith("SECRET_KEY="))
+    line = next(
+        entry
+        for entry in (REPO / ".env.example").read_text(encoding="utf-8").splitlines()
+        if entry.startswith("SECRET_KEY=")
+    )
     placeholder = line.split("=", 1)[1]
     no_configuration.setenv("SECRET_KEY", placeholder)
 
@@ -214,7 +213,12 @@ def test_the_placeholder_in_env_example_is_too_short_to_use(no_configuration):
 def test_no_real_secret_is_committed_in_source_docs_or_examples():
     # A heuristic: any SECRET_KEY assignment with a long run of key-like characters.
     pattern = re.compile(r"(?i)secret_key\s*[=:]\s*['\"]?[A-Za-z0-9_\-]{20,}")
-    scanned = [*REPO.joinpath("app").rglob("*.py"), REPO / "README.md", REPO / ".env.example", REPO / "docker-compose.yml"]
+    scanned = [
+        *REPO.joinpath("app").rglob("*.py"),
+        REPO / "README.md",
+        REPO / ".env.example",
+        REPO / "docker-compose.yml",
+    ]
 
     offenders = [path.name for path in scanned if pattern.search(path.read_text(encoding="utf-8"))]
 

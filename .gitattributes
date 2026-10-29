@@ -1,0 +1,3 @@
+# Keep repository content LF on every platform, including Windows checkouts
+# with core.autocrlf, so formatting checks and Docker builds behave the same.
+* text=auto eol=lf

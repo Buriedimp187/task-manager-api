@@ -121,9 +121,7 @@ def test_metadata_registers_the_users_and_tasks_tables():
 
 def test_application_code_never_creates_tables_itself():
     # Schema changes belong exclusively to Alembic migrations.
-    offenders = [
-        path.name for path in APP_DIR.rglob("*.py") if "create_all" in path.read_text(encoding="utf-8")
-    ]
+    offenders = [path.name for path in APP_DIR.rglob("*.py") if "create_all" in path.read_text(encoding="utf-8")]
 
     assert offenders == []
 
@@ -216,6 +214,7 @@ def test_the_api_username_rule_and_the_database_check_accept_the_same_names(cand
         accepted_by_api = False
 
     assert accepted_by_api == accepted_by_database, repr(candidate)
+
 
 def test_user_read_exposes_no_password_material():
     created_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)

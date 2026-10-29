@@ -5,9 +5,11 @@ Revises: 0001
 Create Date: 2026-10-29 01:00:00.000000
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -58,9 +60,7 @@ def upgrade() -> None:
     op.create_index("uq_users_username_lower", "users", [sa.text("lower(username)")], unique=True)
 
     op.add_column("tasks", sa.Column("owner_id", sa.Integer(), nullable=False))
-    op.create_foreign_key(
-        op.f("fk_tasks_owner_id_users"), "tasks", "users", ["owner_id"], ["id"], ondelete="CASCADE"
-    )
+    op.create_foreign_key(op.f("fk_tasks_owner_id_users"), "tasks", "users", ["owner_id"], ["id"], ondelete="CASCADE")
     op.create_index("ix_tasks_owner_id_id", "tasks", ["owner_id", "id"])
 
 

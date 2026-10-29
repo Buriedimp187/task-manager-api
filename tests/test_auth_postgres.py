@@ -9,13 +9,13 @@ from types import SimpleNamespace
 
 import jwt
 import pytest
-from alembic import command
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
+from alembic import command
 from app import security
 from app.config import get_auth_settings
 from app.database import get_db
@@ -50,7 +50,9 @@ def login(client, username="alice", password=PASSWORD):
 
 def users(stack):
     with stack.engine.connect() as connection:
-        return [tuple(row) for row in connection.execute(text("SELECT id, username, password_hash FROM users ORDER BY id"))]
+        return [
+            tuple(row) for row in connection.execute(text("SELECT id, username, password_hash FROM users ORDER BY id"))
+        ]
 
 
 def test_the_whole_flow_register_login_and_use_the_api(stack):
@@ -170,7 +172,13 @@ def test_secrets_never_reach_the_logs_in_real_flows(stack, caplog):
         register(stack.client, "alice")  # 409
 
     [(_, _, password_hash)] = users(stack)
-    for secret in (PASSWORD, "the wrong password", token, password_hash, get_auth_settings().secret_key.get_secret_value()):
+    for secret in (
+        PASSWORD,
+        "the wrong password",
+        token,
+        password_hash,
+        get_auth_settings().secret_key.get_secret_value(),
+    ):
         assert secret not in caplog.text
 
 

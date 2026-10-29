@@ -311,9 +311,7 @@ def test_without_unencodable_text_only_touches_unencodable_text():
 
     assert without_unencodable_text(clean) == clean
     assert without_unencodable_text(clean)["loc"] == ("body", "title")  # tuples stay tuples
-    assert without_unencodable_text({"\ud800": ["a\udfffb", ("x",)]}) == {
-        UNENCODABLE_TEXT: [UNENCODABLE_TEXT, ("x",)]
-    }
+    assert without_unencodable_text({"\ud800": ["a\udfffb", ("x",)]}) == {UNENCODABLE_TEXT: [UNENCODABLE_TEXT, ("x",)]}
     assert without_unencodable_text(object) is object  # other types pass through untouched
 
 

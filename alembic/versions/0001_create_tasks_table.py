@@ -5,9 +5,11 @@ Revises:
 Create Date: 2026-10-28 22:59:31.444846
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -33,9 +35,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint("char_length(btrim(title)) > 0", name=op.f("ck_tasks_title_not_blank")),
-        sa.CheckConstraint(
-            "status IN ('todo', 'in_progress', 'done')", name=op.f("ck_tasks_task_status")
-        ),
+        sa.CheckConstraint("status IN ('todo', 'in_progress', 'done')", name=op.f("ck_tasks_task_status")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_tasks")),
     )
 

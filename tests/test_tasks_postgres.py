@@ -12,7 +12,6 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from alembic import command
 from fakes import bearer_headers
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
@@ -21,6 +20,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
+from alembic import command
 from app.database import get_db
 from app.main import app
 from app.models import Task
@@ -73,6 +73,7 @@ def insert_directly(api, *ids, title="seeded", owner_id=None):
                 text("INSERT INTO tasks (id, owner_id, title) VALUES (:id, :owner, :title)"),
                 {"id": task_id, "owner": owner_id, "title": title},
             )
+
 
 # --- POST /tasks ---------------------------------------------------------------------------------
 
@@ -228,7 +229,15 @@ def test_patch_can_move_a_task_through_every_status(api):
 
 @pytest.mark.parametrize(
     "payload",
-    [{}, {"title": None}, {"status": None}, {"title": "   "}, {"title": "bad\u0000"}, {"status": "archived"}, {"id": 9}],
+    [
+        {},
+        {"title": None},
+        {"status": None},
+        {"title": "   "},
+        {"title": "bad\u0000"},
+        {"status": "archived"},
+        {"id": 9},
+    ],
 )
 def test_rejected_patches_leave_the_stored_row_unchanged(api, payload):
     created = api.client.post("/tasks", json={"title": "Stable", "description": "d"}).json()
@@ -429,7 +438,9 @@ def test_a_delete_waits_for_a_patch_that_holds_the_row_and_neither_fails(api):
     task_id = api.client.post("/tasks", json={"title": "contended"}).json()["id"]
 
     with paused_after_the_row_lock() as (locked, release):
-        patcher, patch = in_thread(api, "patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "patched"}))
+        patcher, patch = in_thread(
+            api, "patch-thread", lambda c: c.patch(f"/tasks/{task_id}", json={"title": "patched"})
+        )
         assert locked.wait(timeout=20), "the PATCH never reached its row lock"
         deleter, delete = in_thread(api, "delete-thread", lambda c: c.delete(f"/tasks/{task_id}"))
         time.sleep(1)
@@ -565,7 +576,7 @@ def test_forged_ownership_is_rejected_and_changes_nothing(api, field):
 
 def test_a_forged_query_string_or_header_cannot_choose_the_owner(api):
     response = api.bob.post(
-        "/tasks?owner_id=%d" % api.alice_id,
+        f"/tasks?owner_id={api.alice_id}",
         json={"title": "bob's"},
         headers={"X-Owner-Id": str(api.alice_id), "X-User-Id": str(api.alice_id)},
     )
