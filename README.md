@@ -228,14 +228,14 @@ To try the containerized API during development, add the `app` profile: `docker 
 - The API health check calls `/health/db`, so the container is `unhealthy` while the database is unreachable (about 45 seconds into an outage) and recovers by itself when it returns; it is not restarted for that.
 - `docker stop` sends SIGTERM to uvicorn, which finishes in-flight requests (up to 15 seconds), closes the connection pool and exits with code 0.
 - uvicorn runs with `--no-proxy-headers`, so `X-Forwarded-For` is ignored. Behind a reverse proxy, set `TRUSTED_PROXIES` to the proxy's address; see "Abuse protection".
-- Secrets are never in the image or in the Compose files. `POSTGRES_*` and `SECRET_KEY` must be set in `.env` (or the environment), or Compose refuses to start. Other settings in `.env` (limits, `TRUSTED_PROXIES`) are passed through to the API.
+- Secrets are never in the image or in the Compose files. `POSTGRES_*` and `SECRET_KEY` must be set in `.env` (or the environment), or Compose refuses to start. Every variable in `.env` is passed to the API container, not only the settings it reads (see "Known limitations").
 
 **Operating it**
 
 - Put a TLS-terminating reverse proxy in front of the loopback port; the API itself speaks plain HTTP.
 - Run **one API container**. The rate limiter and the connection limiter keep their state in memory (see "Abuse protection").
 - Data lives in the `postgres_data` volume of the `task-manager-api` project. Back it up (for example with `pg_dump`) before upgrading; `docker compose down` keeps it and `down -v` destroys it.
-- **Volume names changed.** The database volume is `<project name>_postgres_data`. This stack now has the fixed project name `task-manager-api`, so its volume is `task-manager-api_postgres_data`. Earlier versions had no fixed name, so Compose used the folder name lowercased with spaces removed (for a folder called `Projeto 1`: `projeto1_postgres_data`). Nothing deletes or replaces an old volume, but a stack started now creates a **new, empty** database next to it, and the API will appear to have lost its data. Before upgrading, run `docker volume ls --filter name=_postgres_data` to see whether you have an old volume. To keep using it, put its project name (the part before `_postgres_data`) in `.env` as `COMPOSE_PROJECT_NAME=<old name>`, or pass `-p <old name>` to every `docker compose` command; either overrides the fixed name. To move to the new name instead, dump the old database (`pg_dump`) and restore it into the new one.
+- **Volume names changed.** The database volume is `<project name>_postgres_data`. This stack now has the fixed project name `task-manager-api`, so its volume is `task-manager-api_postgres_data`. Earlier versions had no fixed name, so Compose used the folder name lowercased with spaces removed (for a folder called `My Project`: `myproject_postgres_data`). Nothing deletes or replaces an old volume, but a stack started now creates a **new, empty** database next to it, and the API will appear to have lost its data. Before upgrading, run `docker volume ls --filter name=_postgres_data` to see whether you have an old volume. To keep using it, put its project name (the part before `_postgres_data`) in `.env` as `COMPOSE_PROJECT_NAME=<old name>`, or pass `-p <old name>` to every `docker compose` command; either overrides the fixed name. To move to the new name instead, dump the old database (`pg_dump`) and restore it into the new one.
 - Update the pinned image digests in `Dockerfile` and `docker-compose.yml` on purpose when taking base-image security updates.
 
 ## Authentication
@@ -460,6 +460,18 @@ For the PostgreSQL job, start a disposable database (see "PostgreSQL integration
 - **Tasks.** At most 1,000 per account; no filtering, search or `updated_at`; page totals and pages are not read as one snapshot.
 - **Database.** Backups are up to you. Downgrade guards protect only online migrations, not the SQL printed by `--sql`. Renaming the
   Compose project changes the volume name (see "Volume names changed").
+- **Health endpoint.** Confirmed from the code: `GET /health/db` needs no token and is not rate limited, and each call briefly
+  uses one database connection for a `SELECT 1`. If the API is reachable from the internet, restrict or rate limit that path at
+  the reverse proxy. `GET /health` does not touch the database.
+- **Login capacity.** Confirmed from the code: login and registration keep their database connection while the password is
+  hashed or checked (about 20 ms with the production Argon2 settings on a development machine), so with the default pool at most
+  20 password checks run at once. Not tested: whether many addresses together could use this to keep the pool busy, because the
+  per-address rate limits do not stop a distributed flood. Other requests would then wait up to `DB_POOL_TIMEOUT_SECONDS` and
+  receive the retryable `503`. No attack of this kind has been run against the API. This is a capacity limit, not a way to read
+  or change data.
+- **`.env` is passed whole.** Confirmed from the Compose file: the API container receives every variable in `.env`, not only the
+  ones the application reads, while the migration container receives only the database settings. Keep `.env` to this project's
+  settings.
 - **Supply chain.** Dependencies and base images are pinned for reproducibility but not scanned or updated automatically.
 - **Verification.** The GitHub Actions workflow has not run on GitHub, and the project has had no independent security review.
   The suite has passed locally on Windows with Python 3.14 and in Linux containers with Python 3.13 and 3.14, including

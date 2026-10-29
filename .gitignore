@@ -8,6 +8,14 @@ venv/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
 
 # Tests and coverage
 .pytest_cache/
@@ -24,3 +32,13 @@ desktop.ini
 # Logs and local databases
 *.log
 *.sqlite3
+
+# Backups and database dumps (never commit data)
+*.bundle
+*.dump
+*.pgdump
+*.sql.gz
+dump.sql
+*_dump.sql
+*-dump.sql
+backup*.sql
