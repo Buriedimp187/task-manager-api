@@ -1,26 +1,19 @@
 # Security policy
 
-> **Status: private vulnerability reporting is not available yet.** The repository is on GitHub but is still private, and
-> no private contact has been set up, so this policy cannot yet tell you where to send a report. See
-> "Reporting a vulnerability" below.
-
 This is a small, single-maintainer project. The policy below says what is covered and what a report should contain.
 It makes no promises about response times and there is no bug bounty.
 
 ## Reporting a vulnerability
 
-> **A private reporting channel has not been configured yet.** This section must be completed by the maintainer
-> when the project is made public (see "Before publishing" below). Until a private contact is listed here:
->
-> - **Do not publish details of a vulnerability** in a public issue, pull request, discussion or commit.
-> - If a public issue is the only way to reach the maintainer, open one that says only that you have a security
->   report and asks for a private way to send it. Include no technical details, payloads, tokens or personal data.
+Please report vulnerabilities privately, using GitHub's **private vulnerability reporting**. It is enabled for this
+repository. Open the repository's **Security** tab, choose **Report a vulnerability**, and fill in the form (see
+"What to include" below). The report is visible only to you and the maintainer until the maintainer decides otherwise.
 
-The intended channel is GitHub's **private vulnerability reporting**, which lets a reporter send details to the maintainer
-without making them public. It is **not enabled**. GitHub does not appear to offer it while a repository is private (its
-documentation describes it for public repositories), so the maintainer plans to turn it on in the repository's settings
-once the repository is public. While the repository is private, people outside it cannot see it or report anything through
-it. Until this section says the channel is enabled, treat it as incomplete rather than as permission to disclose publicly.
+**Do not publish details of a vulnerability** in a public issue, pull request, discussion or commit. If you cannot use
+GitHub's form, open an issue that says only that you have a security report and asks for a private way to send it. Include
+no technical details, payloads, tokens or personal data.
+
+No other private contact (such as an e-mail address) is offered. A reporter needs a GitHub account to use the form.
 
 ## What to include
 
@@ -65,8 +58,6 @@ there; nothing is backported. If releases are published later, this section will
 
 ## What a reporter is asked to do
 
-This applies once a private channel exists.
-
 - Test only against a deployment you own, or against a local copy.
 - Do not access, change or delete data that is not yours. If you reach other people's data by accident, stop,
   do not keep or share it, and say so in the report.
@@ -76,18 +67,20 @@ This applies once a private channel exists.
 
 ## What the maintainer will try to do
 
-Once a private channel exists, on a best-effort basis: acknowledge the report, confirm or explain why it is not a
+On a best-effort basis: acknowledge the report, confirm or explain why it is not a
 vulnerability, fix confirmed problems, and credit the reporter if they wish. No response time is guaranteed.
 
-## Before publishing
+## Repository protections
 
-For the maintainer. Do these when the repository is made public, then delete this section:
+These GitHub settings were enabled and checked on 2026-10-29. They are settings of the hosted repository, not part of the
+code, so they can change without a commit.
 
-- [ ] Enable private vulnerability reporting, or add a monitored private contact, and replace the notice under
-      "Reporting a vulnerability" with it. While the repository was private, GitHub's API reported no state for this feature
-      (HTTP 404), whereas it reports on or off for public repositories. That is evidence that the feature is not offered for
-      a private repository, not proof, so expect to enable it right after the repository is made public, and check the
-      settings. Do not list an address that nobody reads.
-- [ ] Confirm that no real secret has ever been committed (`.env` is ignored, and `.env.example` holds only
-      placeholders), and rotate any `SECRET_KEY` or database password that was ever shared.
-- [x] Copyright holder decided: `LICENSE` names `Buriedimp187`, the owner of the project. No change needed.
+- Private vulnerability reporting, Dependabot alerts and Dependabot security updates.
+- Secret scanning and push protection. The optional extra patterns and validity checks are off.
+- A ruleset on `main` that blocks deleting the branch and force-pushes.
+- GitHub Actions workflows run with a read-only token, actions must be pinned to full commit SHAs, and workflows from
+  outside contributors need the maintainer's approval before they run.
+
+Not enabled: required pull requests, required reviews, required status checks, and code scanning (CodeQL). The maintainer
+can push to `main` directly, and nobody else reviews changes before they land. Dependabot version updates are not
+configured, so pinned dependencies are not refreshed automatically.

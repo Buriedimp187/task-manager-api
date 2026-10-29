@@ -4,8 +4,8 @@ A REST API for managing personal task lists, built with Python, FastAPI, Postgre
 People register, log in, and manage their own tasks; nobody else can see or change them.
 
 **Status: early development, no releases yet.** The code has not had an independent security review or audit. The
-GitHub Actions workflow's first run on GitHub, a push to the then-private repository, passed all of its jobs; the
-workflow has not yet run on a public repository. See
+GitHub Actions workflow passed all of its jobs on its two runs so far, both on pushes made while the repository was still
+private; it has not yet run since the repository became public. See
 [Known limitations](#known-limitations-and-operational-notes) before relying on it for anything important.
 
 ## Features
@@ -19,7 +19,7 @@ workflow has not yet run on a public repository. See
   timeouts, a bounded connection pool, and a controlled `503` when the database is unavailable or busy.
 - Liveness and readiness health endpoints.
 - A hardened container image and a production Docker Compose stack, separate from the development workflow.
-- Ruff, a test suite with PostgreSQL integration tests, and a GitHub Actions workflow (its first run on GitHub passed).
+- Ruff, a test suite with PostgreSQL integration tests, and a GitHub Actions workflow.
 
 ## Contents
 
@@ -414,11 +414,12 @@ The default test run does not need a running database. The task endpoint tests i
 
 ## Continuous integration
 
-> **First run on GitHub passed; no run on a public repository yet.** The workflow ran on GitHub for the first time on
-> 2026-10-29 (run 40842390327, a push of `main` at commit `082d72a`, while the repository was still private). All four job
-> runs succeeded: the lint and test job on Python 3.13 and on 3.14, the PostgreSQL job, and the Docker image and Compose stack
-> job. The whole run took under two minutes. What has not been exercised is anything that only happens on a public
-> repository, such as workflows triggered by pull requests from forks and the approval settings that apply to them.
+> **Two runs so far, both passed; neither was on the public repository.** The workflow first ran on GitHub on 2026-10-29
+> (run 40842390327, a push of `main` at commit `082d72a`), and ran again for the documentation commit `5621eb2` (run
+> 40845320575). Both pushes were made while the repository was still private. All four job runs succeeded in each: the lint
+> and test job on Python 3.13 and on 3.14, the PostgreSQL job, and the Docker image and Compose stack job, in under two
+> minutes. What has not been exercised is anything that only happens on a public repository, such as workflows triggered by
+> pull requests from forks. Those need the maintainer's approval to run (see [SECURITY.md](SECURITY.md)).
 
 `.github/workflows/ci.yml` runs on every pull request, on every push to the repository's **default branch**, and on demand (**Actions** > **CI** > **Run workflow**). No branch name is written in the file: each job checks `github.event.repository.default_branch`, so it keeps working if the default branch is not called `main`. A push to another branch starts the workflow with every job skipped, and its pull request is tested once. A newer push to a pull request cancels the run in progress; runs on the default branch are never cancelled. It needs no secrets, has read-only access to the repository, and deploys or publishes nothing.
 
@@ -437,8 +438,12 @@ come from `requirements-dev.txt` and `constraints.txt`, so CI and your machine r
 to full commit SHAs (the version is in the comment beside each), and the database image digests are pinned too. Update all of
 them on purpose.
 
-The workflow does not scan dependencies or images for known vulnerabilities, and nothing updates the pinned versions
-automatically.
+The workflow does not scan dependencies or images for known vulnerabilities. GitHub's Dependabot alerts and security updates
+are enabled for the repository, but they are separate from this workflow and their coverage is partial. As of 2026-10-29,
+GitHub's dependency graph tracks 11 direct PyPI dependencies and the 2 GitHub Actions. The other 32 of the 43 packages pinned
+in `constraints.txt`, which are mostly transitive dependencies, and the Docker base-image digests are not in the graph, so
+Dependabot cannot alert on them. It reported no open alerts then, which says nothing about those untracked pins. No Dependabot
+version updates are configured, so the pinned versions are not refreshed automatically.
 
 **Running the same checks locally** (PowerShell or bash, with the virtual environment active):
 
@@ -475,14 +480,24 @@ For the PostgreSQL job, start a disposable database (see "PostgreSQL integration
 - **`.env` is passed whole.** Confirmed from the Compose file: the API container receives every variable in `.env`, not only the
   ones the application reads, while the migration container receives only the database settings. Keep `.env` to this project's
   settings.
-- **Supply chain.** Dependencies and base images are pinned for reproducibility but not scanned or updated automatically.
-- **Verification.** The GitHub Actions workflow has not yet run on a public repository (see "Continuous integration"), and
-  the project has had no independent security review.
+- **Supply chain.** Dependencies and base images are pinned for reproducibility. The workflow does not scan them. Dependabot
+  alerts and security updates are enabled on GitHub, but they cover only part of it: the dependency graph tracks the 11 direct
+  PyPI dependencies and the 2 GitHub Actions, not the other 32 pins in `constraints.txt` or the Docker base-image digests (see
+  "Continuous integration"). The pins are not updated automatically otherwise.
+- **Verification.** The GitHub Actions workflow has not yet run on the public repository (see "Continuous integration"), and
+  the project has had no independent security review. The repository has no required code reviews, no required status checks
+  and no code scanning (CodeQL); the maintainer pushes to `main` directly.
 
 ## Security
 
-To report a vulnerability, read [SECURITY.md](SECURITY.md) first. It currently notes that no private reporting channel has been
-set up yet, so please do not publish vulnerability details in a public issue.
+To report a vulnerability, use GitHub's private vulnerability reporting (the repository's **Security** tab, then **Report a
+vulnerability**) and read [SECURITY.md](SECURITY.md) first. Please do not publish vulnerability details in a public issue.
+
+Enabled on the GitHub repository: private vulnerability reporting, Dependabot alerts and security updates, secret scanning with
+push protection, a ruleset on `main` that blocks deletion and force-pushes, read-only workflow tokens, actions pinned to full
+commit SHAs (enforced), and maintainer approval for workflows from outside contributors. Not enabled: required reviews or status
+checks and code scanning. These are repository settings, not part of the code. Rate limiting is in memory and per process (see
+"Known limitations").
 
 ## License
 
