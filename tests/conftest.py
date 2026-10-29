@@ -32,6 +32,8 @@ def authentication_settings(monkeypatch):
     """
     monkeypatch.setenv("SECRET_KEY", secrets.token_urlsafe(48))
     monkeypatch.setattr(security, "password_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
+    monkeypatch.setattr(security, "_dummy_password_hash", None)
+    security.initialize_dummy_password_hash()  # the app does this at start-up; most tests never start it
     get_auth_settings.cache_clear()
     yield
     get_auth_settings.cache_clear()

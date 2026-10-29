@@ -15,6 +15,7 @@ from app.body_limit import BodySizeLimitMiddleware
 from app.config import get_access_settings, get_auth_settings, get_server_settings
 from app.database import DatabaseBusy, dispose_engine, get_db
 from app.routers import auth, tasks
+from app.security import initialize_dummy_password_hash
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     # module (as the tests do) still needs no configuration: this only runs when the server starts.
     get_auth_settings()
     get_access_settings()  # likewise for the rate-limit, registration and proxy settings
+    initialize_dummy_password_hash()  # once now, so no login request pays for it
     # Synchronous endpoints run in a thread pool; its size, with the connection pool, bounds the work in flight.
     anyio.to_thread.current_default_thread_limiter().total_tokens = get_server_settings().request_threads
     try:

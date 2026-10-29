@@ -195,7 +195,7 @@ Over the limit the API answers `429 {"detail": "Too many requests. Try again lat
 | Registering a name that is taken, in any letter case | `409 {"detail": "Username already taken"}` (registration necessarily reveals this) |
 | Invalid registration or login body | `422` **without the `input` field**, so a submitted password is never echoed back, not even inside an error about a missing field |
 
-Tokens are signed with HS256. The server fixes the accepted algorithm and requires the `sub`, `iat` and `exp` claims, so unsigned tokens, tokens signed with another key or algorithm, and tokens missing a claim are all refused.
+Tokens are signed with HS256. The server fixes the accepted algorithm and requires the `sub`, `iat` and `exp` claims, so unsigned tokens, tokens signed with another key or algorithm, and tokens missing a claim are all refused. The claims are checked strictly: a token must carry exactly `sub`, `iat` and `exp`; `iat` and `exp` must be whole numbers (not strings, decimals or booleans), `exp` must be in the future and after `iat`, `iat` may not be in the future (beyond 5 seconds of clock skew), the token may not live longer than the 30 minutes this server issues, and `sub` must be a positive integer that fits the user id column. Every failure is the same `401`. The password hash used to keep the login time of unknown usernames in line with real ones is created once when the server starts.
 
 **Limitations.** There is **no rate limiting**, so logins can be tried without limit and each one costs CPU and memory to hash. Registration is open to anyone. There is no password change or reset, email verification, account deletion or roles. A token cannot be revoked before it expires (logging out is up to the client).
 
