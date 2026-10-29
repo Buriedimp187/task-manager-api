@@ -1,5 +1,6 @@
 # Exact versions of every package in the verified development environment (Python 3.14).
 # Use with: pip install -r requirements-dev.txt -c constraints.txt
+# Generated on Windows; lines with a platform marker cover packages that only install elsewhere (the Docker image).
 alembic==1.20.1
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -42,3 +43,4 @@ tzdata==2026.6
 uvicorn==0.54.0
 watchfiles==1.3.0
 websockets==17.3
+uvloop==0.23.0; sys_platform != "win32"

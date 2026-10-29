@@ -61,6 +61,9 @@ class ServerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     request_threads: int = Field(20, ge=1, le=200)  # worker threads running the synchronous endpoints
+    # The interactive documentation (/docs, /redoc) and the OpenAPI description (/openapi.json). On for development;
+    # the container image's Compose file turns it off unless asked.
+    docs_enabled: bool = True
 
 
 class AccessSettings(BaseSettings):

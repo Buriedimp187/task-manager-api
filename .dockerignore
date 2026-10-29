@@ -1,0 +1,43 @@
+# Keep the build context small and keep secrets out of it. Only requirements.txt, constraints.txt, app/,
+# alembic/ and alembic.ini are copied into the image; everything else is excluded here as a second line of defence.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Version control and tooling
+.git
+.gitignore
+.gitattributes
+.editorconfig
+
+# Python environments and caches
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Tests, development dependencies and documentation
+tests
+requirements-dev.txt
+README.md
+
+# Docker files themselves, logs and local databases
+Dockerfile
+docker-compose*.yml
+.dockerignore
+*.log
+*.sqlite3
+
+# Editors and OS files
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini

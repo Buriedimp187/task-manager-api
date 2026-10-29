@@ -1,0 +1,22 @@
+# Development conveniences. Docker Compose loads this file automatically next to docker-compose.yml, so the usual
+#
+#   docker compose up -d --wait db
+#
+# starts only the database, published on 127.0.0.1 for the API you run on your machine with uvicorn --reload.
+# The production stack ignores this file: docker compose -f docker-compose.yml ...
+services:
+  db:
+    ports:
+      # Bound to localhost only; the database is not reachable from other machines.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  # The containerized API is opt-in during development: docker compose --profile app up -d --build --wait
+  migrate:
+    profiles: [app]
+
+  api:
+    profiles: [app]
+    environment:
+      # Open registration and the interactive docs by default, so a development container is usable at once.
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      DOCS_ENABLED: ${DOCS_ENABLED:-true}

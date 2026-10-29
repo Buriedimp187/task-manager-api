@@ -137,6 +137,39 @@ uvicorn app.main:app --reload --no-proxy-headers
 
 Open http://127.0.0.1:8000/docs for the interactive documentation. Register and log in with the `/auth` endpoints, then use **Authorize** and paste the `access_token`.
 
+## Docker: development and production
+
+There are two ways to use Docker Compose with this project. The files make the difference explicit:
+
+| | Development (default) | Production |
+|---|---|---|
+| Command | `docker compose up -d --wait db` | `docker compose -f docker-compose.yml up -d --build --wait` |
+| Files | `docker-compose.yml` + `docker-compose.override.yml`, loaded automatically | `docker-compose.yml` only (naming it with `-f` skips the override) |
+| Starts | PostgreSQL only; you run the API yourself with `uvicorn --reload` | PostgreSQL, a one-shot migration, then the API |
+| PostgreSQL port | published on `127.0.0.1:${POSTGRES_PORT:-5432}` | **not published**: only the stack's own containers reach it |
+| API | on your machine | in a container, published on `127.0.0.1:${API_PORT:-8000}` |
+| Registration, `/docs` | on | **off** unless `REGISTRATION_ENABLED=true` / `DOCS_ENABLED=true` is set in `.env` |
+
+To try the containerized API during development, add the `app` profile: `docker compose --profile app up -d --build --wait` (registration and `/docs` stay on there).
+
+**What the production stack does**
+
+- The image (`Dockerfile`) is built in two stages from a digest-pinned `python:3.13-slim`. Only the runtime requirements are installed, with every version fixed by `constraints.txt`, and the final image has no compiler, no `pip`, no tests and no `.env`. The application runs as an unprivileged user (UID 10001) and cannot modify the code.
+- The API and migration containers run with a read-only root filesystem, no Linux capabilities, `no-new-privileges` and a process limit; the API gets a small `/tmp` in memory. The database container drops all capabilities except the five its entrypoint needs.
+- Start-up order is database (healthy), then `alembic upgrade head`, then the API. Migrations never run downgrades. If one fails, the API does not start.
+- The API health check calls `/health/db`, so the container is `unhealthy` while the database is unreachable (about 45 seconds into an outage) and recovers by itself when it returns; it is not restarted for that.
+- `docker stop` sends SIGTERM to uvicorn, which finishes in-flight requests (up to 15 seconds), closes the connection pool and exits with code 0.
+- uvicorn runs with `--no-proxy-headers`, so `X-Forwarded-For` is ignored. Behind a reverse proxy, set `TRUSTED_PROXIES` to the proxy's address; see "Abuse protection".
+- Secrets are never in the image or in the Compose files. `POSTGRES_*` and `SECRET_KEY` must be set in `.env` (or the environment), or Compose refuses to start. Other settings in `.env` (limits, `TRUSTED_PROXIES`) are passed through to the API.
+
+**Operating it**
+
+- Put a TLS-terminating reverse proxy in front of the loopback port; the API itself speaks plain HTTP.
+- Run **one API container**. The rate limiter and the connection limiter keep their state in memory (see "Abuse protection").
+- Data lives in the `postgres_data` volume of the `task-manager-api` project. Back it up (for example with `pg_dump`) before upgrading; `docker compose down` keeps it and `down -v` destroys it.
+- **Volume names changed.** The database volume is `<project name>_postgres_data`. This stack now has the fixed project name `task-manager-api`, so its volume is `task-manager-api_postgres_data`. Earlier versions had no fixed name, so Compose used the folder name lowercased with spaces removed (for a folder called `Projeto 1`: `projeto1_postgres_data`). Nothing deletes or replaces an old volume, but a stack started now creates a **new, empty** database next to it, and the API will appear to have lost its data. Before upgrading, run `docker volume ls --filter name=_postgres_data` to see whether you have an old volume. To keep using it, put its project name (the part before `_postgres_data`) in `.env` as `COMPOSE_PROJECT_NAME=<old name>`, or pass `-p <old name>` to every `docker compose` command; either overrides the fixed name. To move to the new name instead, dump the old database (`pg_dump`) and restore it into the new one.
+- Update the pinned image digests in `Dockerfile` and `docker-compose.yml` on purpose when taking base-image security updates.
+
 ## Authentication
 
 Anyone can create an account, then log in to get an access token. The health endpoints are public; everything under `/tasks` needs a token.
@@ -180,7 +213,7 @@ Over the limit the API answers `429 {"detail": "Too many requests. Try again lat
 
 - Counters live in this process's memory: they reset on restart, and with several processes or replicas each counts separately, so the real limit is multiplied. Run one process, or add a shared store.
 - Clients are identified by their connection address. `X-Forwarded-For` is ignored unless the connection comes from a `TRUSTED_PROXIES` entry; then the nearest address in the header that is not itself a trusted proxy is used.
-- **Start uvicorn with `--no-proxy-headers`.** By default uvicorn rewrites the client address from `X-Forwarded-For` for connections from `127.0.0.1`, which lets a local client evade the limits (verified). Behind a reverse proxy, use `--no-proxy-headers` together with `TRUSTED_PROXIES`.
+- **Start uvicorn with `--no-proxy-headers`** (the Docker image already does). By default uvicorn rewrites the client address from `X-Forwarded-For` for connections from `127.0.0.1`, which lets a local client evade the limits (verified). Behind a reverse proxy, use `--no-proxy-headers` together with `TRUSTED_PROXIES`.
 - Behind a reverse proxy, list the proxy in `TRUSTED_PROXIES` (and keep `--no-proxy-headers`). Without it every user appears to come from the proxy's address and shares one set of limits. The proxy must set or append `X-Forwarded-For` itself, not pass a client's value through unchanged. Do not set uvicorn's `FORWARDED_ALLOW_IPS` or pass `--proxy-headers`: they make uvicorn trust the header independently of this setting.
 - Many clients behind one address (a company NAT) share its limits.
 

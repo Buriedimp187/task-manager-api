@@ -35,7 +35,14 @@ async def lifespan(app: FastAPI):
         dispose_engine()  # close the pooled connections instead of leaving them for the server to cut
 
 
-app = FastAPI(title="Task Manager API", lifespan=lifespan)
+_docs = get_server_settings().docs_enabled  # read at import: the routes below exist only if they are on
+app = FastAPI(
+    title="Task Manager API",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
 app.add_middleware(BodySizeLimitMiddleware)
 app.include_router(auth.router)
 app.include_router(tasks.router)
