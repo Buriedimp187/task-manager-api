@@ -1,7 +1,8 @@
 # Security policy
 
-> **Status: private vulnerability reporting is not available yet.** No private contact has been set up, so this
-> policy cannot yet tell you where to send a report. See "Reporting a vulnerability" below.
+> **Status: private vulnerability reporting is not available yet.** The repository is on GitHub but is still private, and
+> no private contact has been set up, so this policy cannot yet tell you where to send a report. See
+> "Reporting a vulnerability" below.
 
 This is a small, single-maintainer project. The policy below says what is covered and what a report should contain.
 It makes no promises about response times and there is no bug bounty.
@@ -9,16 +10,17 @@ It makes no promises about response times and there is no bug bounty.
 ## Reporting a vulnerability
 
 > **A private reporting channel has not been configured yet.** This section must be completed by the maintainer
-> before the project is published (see "Before publishing" below). Until a private contact is listed here:
+> when the project is made public (see "Before publishing" below). Until a private contact is listed here:
 >
 > - **Do not publish details of a vulnerability** in a public issue, pull request, discussion or commit.
 > - If a public issue is the only way to reach the maintainer, open one that says only that you have a security
 >   report and asks for a private way to send it. Include no technical details, payloads, tokens or personal data.
 
-Once the project is hosted on GitHub, the intended channel is **private vulnerability reporting**
-(the repository's **Security** tab > **Report a vulnerability**), which the maintainer has to enable
-under **Settings** > **Code security**. If that is not enabled, treat this section as incomplete rather than
-as permission to disclose publicly.
+The intended channel is GitHub's **private vulnerability reporting**, which lets a reporter send details to the maintainer
+without making them public. It is **not enabled**. GitHub does not appear to offer it while a repository is private (its
+documentation describes it for public repositories), so the maintainer plans to turn it on in the repository's settings
+once the repository is public. While the repository is private, people outside it cannot see it or report anything through
+it. Until this section says the channel is enabled, treat it as incomplete rather than as permission to disclose publicly.
 
 ## What to include
 
@@ -79,10 +81,13 @@ vulnerability, fix confirmed problems, and credit the reporter if they wish. No 
 
 ## Before publishing
 
-For the maintainer. Do these before the repository is made public, then delete this section:
+For the maintainer. Do these when the repository is made public, then delete this section:
 
 - [ ] Enable private vulnerability reporting, or add a monitored private contact, and replace the notice under
-      "Reporting a vulnerability" with it. Do not list an address that nobody reads.
+      "Reporting a vulnerability" with it. While the repository was private, GitHub's API reported no state for this feature
+      (HTTP 404), whereas it reports on or off for public repositories. That is evidence that the feature is not offered for
+      a private repository, not proof, so expect to enable it right after the repository is made public, and check the
+      settings. Do not list an address that nobody reads.
 - [ ] Confirm that no real secret has ever been committed (`.env` is ignored, and `.env.example` holds only
       placeholders), and rotate any `SECRET_KEY` or database password that was ever shared.
 - [x] Copyright holder decided: `LICENSE` names `Buriedimp187`, the owner of the project. No change needed.
