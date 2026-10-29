@@ -4,8 +4,8 @@ A REST API for managing personal task lists, built with Python, FastAPI, Postgre
 People register, log in, and manage their own tasks; nobody else can see or change them.
 
 **Status: early development, no releases yet.** The code has not had an independent security review or audit. The
-GitHub Actions workflow passed all of its jobs on its two runs so far, both on pushes made while the repository was still
-private; it has not yet run since the repository became public. See
+GitHub Actions workflow passed all of its jobs on each of its three runs so far, including the first run on the public
+repository (a push to `main`, run 40848020063). See
 [Known limitations](#known-limitations-and-operational-notes) before relying on it for anything important.
 
 ## Features
@@ -414,12 +414,13 @@ The default test run does not need a running database. The task endpoint tests i
 
 ## Continuous integration
 
-> **Two runs so far, both passed; neither was on the public repository.** The workflow first ran on GitHub on 2026-10-29
-> (run 40842390327, a push of `main` at commit `082d72a`), and ran again for the documentation commit `5621eb2` (run
-> 40845320575). Both pushes were made while the repository was still private. All four job runs succeeded in each: the lint
-> and test job on Python 3.13 and on 3.14, the PostgreSQL job, and the Docker image and Compose stack job, in under two
-> minutes. What has not been exercised is anything that only happens on a public repository, such as workflows triggered by
-> pull requests from forks. Those need the maintainer's approval to run (see [SECURITY.md](SECURITY.md)).
+> **Three runs so far, all passed, including one on the public repository.** The workflow first ran on GitHub on 2026-10-29
+> (run 40842390327, a push of `main` at commit `082d72a`) and ran again for the documentation commit `5621eb2` (run
+> 40845320575); both pushes were made while the repository was still private. The third run (40848020063, a push of `main` at
+> commit `3216d06`) was the first on the public repository. In each run all four jobs succeeded: the lint and test job on
+> Python 3.13 and on 3.14, the PostgreSQL job, and the Docker image and Compose stack job. What has not been exercised is a
+> workflow triggered by a pull request from a fork. Those need the maintainer's approval to run (see
+> [SECURITY.md](SECURITY.md)).
 
 `.github/workflows/ci.yml` runs on every pull request, on every push to the repository's **default branch**, and on demand (**Actions** > **CI** > **Run workflow**). No branch name is written in the file: each job checks `github.event.repository.default_branch`, so it keeps working if the default branch is not called `main`. A push to another branch starts the workflow with every job skipped, and its pull request is tested once. A newer push to a pull request cancels the run in progress; runs on the default branch are never cancelled. It needs no secrets, has read-only access to the repository, and deploys or publishes nothing.
 
@@ -484,9 +485,9 @@ For the PostgreSQL job, start a disposable database (see "PostgreSQL integration
   alerts and security updates are enabled on GitHub, but they cover only part of it: the dependency graph tracks the 11 direct
   PyPI dependencies and the 2 GitHub Actions, not the other 32 pins in `constraints.txt` or the Docker base-image digests (see
   "Continuous integration"). The pins are not updated automatically otherwise.
-- **Verification.** The GitHub Actions workflow has not yet run on the public repository (see "Continuous integration"), and
-  the project has had no independent security review. The repository has no required code reviews, no required status checks
-  and no code scanning (CodeQL); the maintainer pushes to `main` directly.
+- **Verification.** The GitHub Actions workflow has passed on the public repository (see "Continuous integration"), but has not
+  been exercised by a pull request from a fork, and the project has had no independent security review. The repository has no
+  required code reviews, no required status checks and no code scanning (CodeQL); the maintainer pushes to `main` directly.
 
 ## Security
 
